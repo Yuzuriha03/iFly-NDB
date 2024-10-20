@@ -3,7 +3,7 @@ warnings.filterwarnings('ignore')
 import os
 import pandas as pd
 import re
-from merged_data import generate_merged_data
+from Terminals.merged_data import generate_merged_data
 
 def generate_transitions(data):
 

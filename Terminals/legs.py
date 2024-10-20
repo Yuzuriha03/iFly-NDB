@@ -3,7 +3,7 @@ warnings.filterwarnings('ignore')
 import os
 import pandas as pd
 import re
-from list import list_generate
+from Terminals.list import list_generate
 import concurrent.futures
 import time
 
