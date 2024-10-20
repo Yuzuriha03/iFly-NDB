@@ -7,10 +7,10 @@ from supp import supp
 from wpnavapt import wpnavapt
 from wpnavaid import wpnavaid
 from wpnavfix import wpnavfix
-from wpnavrte import wpnavrte
-from check_route import check_route
-from insert_route import inser_route
-from order_route import order_route
+from Route.wpnavrte import wpnavrte
+from Route.check_route import check_route
+from Route.insert_route import inser_route
+from Route.order_route import order_route
 
 def get_file_path(prompt, file_extension):
 

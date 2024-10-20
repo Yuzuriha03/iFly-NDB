@@ -4,8 +4,8 @@ import os
 import sqlite3
 import time
 import logging
-from enroute import enroute
-from legs import terminals
+from Enroute.enroute import enroute
+from Terminals.legs import terminals
 
 # 设置日志配置
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
