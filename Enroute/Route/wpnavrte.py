@@ -77,7 +77,7 @@ def update_coordinates(conn, ident, latitude, longitude, point_type):
 
     return latitude, longitude
 
-def wpnavrte(conn, csv_file_path):
+def wpnavrte(conn, csv_file_path, navdata_path):
     
     if conn:
         csvPD = pd.read_csv(csv_file_path, encoding='gbk')
@@ -134,7 +134,7 @@ def wpnavrte(conn, csv_file_path):
         airway_segments.sort(key=lambda segment: segment.split()[0]) 
         
         # 保存结果到文件
-        output_folder = 'output'
+        output_folder = f'{navdata_path}/Supplemental'
         if not os.path.exists(output_folder):
             os.makedirs(output_folder)
         

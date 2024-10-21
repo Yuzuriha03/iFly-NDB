@@ -45,7 +45,7 @@ def enroute(conn, file1, csv):
         input_time = wpnavapt(conn, start_airport_id, navdata_path)
         wpnavaid(conn, navdata_path)
         wpnavfix(conn, navdata_path)
-        file2 = wpnavrte(conn, csv)
+        file2 = wpnavrte(conn, csv, navdata_path)
         check_route(file1, file2)
         inser_route(file1, file2)
         order_route(file1)
@@ -54,4 +54,4 @@ def enroute(conn, file1, csv):
         run_time = end_time - start_time - input_time
         print(f"Enroute数据转换完毕，用时：{round(run_time,3)}秒")
 
-        # return navdata_path
+        return navdata_path

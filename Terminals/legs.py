@@ -105,7 +105,7 @@ def process_file(file, root, data):
         f.truncate()
         f.writelines(lines)
 
-def terminals(conn):
+def terminals(conn, navdata_path):
     # 获取用户指定的起止 TerminalID
     start_terminal_id, end_terminal_id = get_terminal_ids()
     start_time = time.time()
@@ -113,7 +113,8 @@ def terminals(conn):
     data = list_generate(conn, start_terminal_id, end_terminal_id)
     with concurrent.futures.ProcessPoolExecutor() as executor:
         futures = []
-        for root, dirs, files in os.walk("output"):
+        for root, dirs, files in os.walk(f"{navdata_path}/Permanent"):
+
             for file in files:
                 futures.append(executor.submit(process_file, file, root, data))
         for future in concurrent.futures.as_completed(futures):

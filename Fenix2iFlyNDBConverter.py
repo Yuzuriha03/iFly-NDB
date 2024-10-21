@@ -64,7 +64,7 @@ if __name__ == "__main__":
     csv = get_file_path("请输入NAIP RTE_SEG.csv文件路径：", "RTE_SEG.csv")
     
     logging.info("开始处理Enroute部分")
-    enroute(conn, file1, csv)
+    navdata_path = enroute(conn, file1, csv)
     logging.info("开始处理Terminals部分")
-    terminals(conn)
+    terminals(conn, navdata_path)
     countdown_timer(10)
