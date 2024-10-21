@@ -33,12 +33,12 @@ def generate_merged_data(conn, start_terminal_id, end_terminal_id):
     for index, row in terminals.iterrows():
         if pd.isnull(row['Rwy']) or row['Rwy'].strip() == '':
             while True:
-                user_input = input(f"Rwy 值为空，请为 {row['ICAO']}.{row['Name']} 手动输入 Rwy 值：").strip()
-                if re.match(r'^[0-9CLR]+$', user_input, re.IGNORECASE):
+                user_input = input(f"{row['ICAO']}.{row['Name']} 对应的Rwy值为空，请手动输入 Rwy 值：").strip()
+                if re.match(r'^\d{2}$', user_input) or re.match(r'^\d{2}[CLR]$', user_input, re.IGNORECASE):
                     terminals.at[index, 'Rwy'] = user_input.upper()
                     break
                 else:
-                    print("输入无效，请重新输入，仅限数字和字母 C、L、R。")
+                    print("输入无效，请重新输入有效的跑道编号。")
     
     # 查询符合条件的 TerminalLegs
     terminal_ids = ', '.join(map(str, terminals['ID'].tolist()))

@@ -30,10 +30,7 @@ def get_db_connection(prompt):
         db_path = get_file_path(prompt, '.db3')
         conn = True
         # 检查文件路径是否有效
-        if db_path == "skip":
-            logging.info("跳过数据库连接")
-            return conn
-        elif not os.path.exists(db_path) or not db_path.endswith('.db3'):
+        if not os.path.exists(db_path) or not db_path.endswith('.db3'):
             logging.warning("无效的db3文件。请重新输入db3文件路径。")
             continue
         else:
