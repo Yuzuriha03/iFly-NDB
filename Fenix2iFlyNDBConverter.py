@@ -60,8 +60,8 @@ def countdown_timer(seconds):
 if __name__ == "__main__":
     # 连接到数据库
     conn = get_db_connection("请输入Fenix的nd.db3文件路径：")
-    file1 = get_file_path("请输入iFly航路文件路径：", "WPNAVRTE.txt")
-    csv = get_file_path("请输入NAIP航路CSV文件路径：", "RTE_SEG.csv")
+    file1 = get_file_path("请输入iFly航路文件路径\n(位于Community\\ifly-aircraft-737max8\\Data\\navdata\\Permanent\\WPNAVRTE.txt)：", "WPNAVRTE.txt")
+    csv = get_file_path("请输入NAIP RTE_SEG.csv文件路径：", "RTE_SEG.csv")
     
     logging.info("开始处理Enroute部分")
     enroute(conn, file1, csv)

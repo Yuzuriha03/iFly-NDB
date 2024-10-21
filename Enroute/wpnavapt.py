@@ -72,67 +72,66 @@ def generate_result_strings(results):
         result_str = f"{name:<24}{icao}{ident:<3}{round(length):05d}{magnetic_heading:03d}{rwy_latitude_str}{rwy_longitude_str}{Frequency_str}{magnetic_heading:03d}{round(rwy_elevation):05d}"
         yield result_str
 
-def wpnavapt(conn, start_apt_id):
-    if not conn:
-        print("No database connection.")
-        return
-    cursor = conn.cursor()
-    input_start_time = time.time()
-    api_key = input("请输入API密钥（密钥获取地址：https://ngdc.noaa.gov/geomag/CalcSurveyFin.shtml）：")
-    input_end_time = time.time()
-    input_time = input_start_time - input_end_time
-    current_date = datetime.date.today()
-    cursor.execute("SELECT ID FROM runways WHERE AirportID = ? LIMIT 1", (start_apt_id,))
-    start_rwy_id_row = cursor.fetchone()
-    start_rwy_id = start_rwy_id_row[0] if start_rwy_id_row else None
-    if start_rwy_id is None:
-        print("未找到对应的RunwayID")
-        conn.close()
-        return
-    cursor.execute(
-        "SELECT ID, Name, ICAO, Latitude, Longtitude FROM airports WHERE ID >= ?", 
-        (start_apt_id,)
-    )
-    airport_rows = cursor.fetchall()
-    failed_runways = []
-    total_airports = len(airport_rows)
-    # 生成tasks
-    tasks = list(generate_tasks(cursor, airport_rows, api_key, current_date))
+def wpnavapt(conn, start_apt_id, navdata_path):
+    
+    if conn:
+        cursor = conn.cursor()
+        input_start_time = time.time()
+        api_key = input("请输入API密钥（密钥获取地址：https://ngdc.noaa.gov/geomag/CalcSurveyFin.shtml）：")
+        input_end_time = time.time()
+        input_time = input_start_time - input_end_time
+        current_date = datetime.date.today()
+        cursor.execute("SELECT ID FROM runways WHERE AirportID = ? LIMIT 1", (start_apt_id,))
+        start_rwy_id_row = cursor.fetchone()
+        start_rwy_id = start_rwy_id_row[0] if start_rwy_id_row else None
+        if start_rwy_id is None:
+            print("未找到对应的RunwayID")
+            conn.close()
+            return
+        cursor.execute(
+            "SELECT ID, Name, ICAO, Latitude, Longtitude FROM airports WHERE ID >= ?", 
+            (start_apt_id,)
+        )
+        airport_rows = cursor.fetchall()
+        failed_runways = []
+        total_airports = len(airport_rows)
+        # 生成tasks
+        tasks = list(generate_tasks(cursor, airport_rows, api_key, current_date))
+            
+        results = []
+        with tqdm(total=total_airports, desc="磁偏角计算进度", unit="个") as pbar:
+            with ThreadPoolExecutor(max_workers=50) as executor:
+                future_to_task = {executor.submit(calculate_declination, task[0]): task for task in tasks}
+                for future in as_completed(future_to_task):
+                    task = future_to_task[future]
+                    try:
+                        magnetic_heading = future.result()
+                        results.append(task + (magnetic_heading,))
+                        pbar.update(1)
+                    except Exception as e:
+                        print(f"磁偏角计算错误: {e}")
+                        results.append(task + (task[0][4],))
+    
         
-    results = []
-    with tqdm(total=total_airports, desc="磁偏角计算进度", unit="个") as pbar:
-        with ThreadPoolExecutor(max_workers=50) as executor:
-            future_to_task = {executor.submit(calculate_declination, task[0]): task for task in tasks}
-            for future in as_completed(future_to_task):
-                task = future_to_task[future]
-                try:
-                    magnetic_heading = future.result()
-                    results.append(task + (magnetic_heading,))
-                    pbar.update(1)
-                except Exception as e:
-                    print(f"磁偏角计算错误: {e}")
-                    results.append(task + (task[0][4],))
-
-    
-    # 对结果按照 ICAO Rwy排序
-    results.sort(key=lambda x: (x[2], x[3]))
-    converted_rows = list(generate_result_strings(results))
-    
-    output_folder = 'output'
-    if not os.path.exists(output_folder):
-        os.makedirs(output_folder)
-    output_file_path = os.path.join(output_folder, 'wpnavapt.txt')
-    with open(output_file_path, 'w', encoding='utf-8') as file:
-        for row in converted_rows:
-            file.write(row + '\n')
-    print(f"已保存到 {os.path.abspath(output_file_path)}")
-    
-    if failed_runways:
-        print("以下Runways未能成功计算：")
-        for runway_id in failed_runways:
-            cursor.execute("SELECT ICAO FROM Airports WHERE ID = (SELECT AirportID FROM Runways WHERE ID = ?)", (runway_id,))
-            icao = cursor.fetchone()
-            cursor.execute("SELECT Ident FROM Runways WHERE ID = ?", (runway_id,))
-            ident = cursor.fetchone()
-            print(f"{icao[0]}{ident[0]:<3}")
-    return input_time
+        # 对结果按照 ICAO Rwy排序
+        results.sort(key=lambda x: (x[2], x[3]))
+        converted_rows = list(generate_result_strings(results))
+        
+        output_folder = f"{navdata_path}/Supplemental"
+        if not os.path.exists(output_folder):
+            os.makedirs(output_folder)
+        output_file_path = os.path.join(output_folder, 'wpnavapt.txt')
+        with open(output_file_path, 'w', encoding='utf-8') as file:
+            for row in converted_rows:
+                file.write(row + '\n')
+        print(f"已保存到 {output_file_path}")
+        
+        if failed_runways:
+            print("以下Runways未能成功计算：")
+            for runway_id in failed_runways:
+                cursor.execute("SELECT ICAO FROM Airports WHERE ID = (SELECT AirportID FROM Runways WHERE ID = ?)", (runway_id,))
+                icao = cursor.fetchone()
+                cursor.execute("SELECT Ident FROM Runways WHERE ID = ?", (runway_id,))
+                ident = cursor.fetchone()
+                print(f"{icao[0]}{ident[0]:<3}")
+        return input_time

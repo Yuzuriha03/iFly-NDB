@@ -21,12 +21,20 @@ def generate_converted_rows(rows):
         result = f"{Ident:<24}{Ident:<5}{Latitude_str}{Longtitude_str}"
         yield (Latitude, result)
 
-def wpnavfix(conn, start_id):
+def wpnavfix(conn, navdata_path):
     if conn:
         cursor = conn.cursor()
+        # 查找第二个 Ident = 89E80 的记录
+        cursor.execute("SELECT ID FROM waypoints WHERE Ident = '89E80'")
+        ids = cursor.fetchall()
+        
+        if len(ids) < 2:
+            print("没有足够的记录")
+        else:
+            second_id = ids[1][0]  # 获取第二个记录的 ID
         
         # 查询waypoints表格
-        cursor.execute("SELECT Ident, Latitude, Longtitude FROM waypoints WHERE ID >= ?", (start_id,))
+        cursor.execute("SELECT Ident, Latitude, Longtitude FROM waypoints WHERE ID > ?", (second_id,))
         rows = cursor.fetchall()
         
         # 使用生成器来生成转换后的行
@@ -36,7 +44,7 @@ def wpnavfix(conn, start_id):
         converted_rows.sort(key=lambda x: x[0])
         
         # 保存结果到文件
-        output_folder = 'output'
+        output_folder = f"{navdata_path}/Supplemental"
         if not os.path.exists(output_folder):
             os.makedirs(output_folder)
         
@@ -45,4 +53,4 @@ def wpnavfix(conn, start_id):
             for _, result in converted_rows:
                 file.write(result + '\n')
         
-        print(f"wpnavfix已保存到程序目录/output")
+        print(f"wpnavfix已保存到{navdata_path}/Supplemental")

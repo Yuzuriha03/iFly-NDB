@@ -19,7 +19,7 @@ def generate_converted_rows(rows):
         result = f"{ICAO}{Latitude_str}{Longtitude_str}"
         yield (Latitude, result)
 
-def airport(conn, start_id):
+def airport(conn, start_id, navdata_path):
 
     if conn:
         cursor = conn.cursor()
@@ -34,14 +34,14 @@ def airport(conn, start_id):
         print("转换成功")
     
         # 保存结果到文件
-        output_folder = 'output'
+        output_folder = f"{navdata_path}\\Supplemental"
         if not os.path.exists(output_folder):
             os.makedirs(output_folder)
         
         output_file_path = os.path.join(output_folder, 'airports.dat')
-        if not os.path.exists('output/'):
-            os.makedirs('output/')
-        with open('output/airports.dat', 'w') as file:
+        if not os.path.exists(output_file_path):
+            os.makedirs(output_file_path)
+        with open(output_file_path, 'w') as file:
             for _, result in converted_rows:
                 file.write(result + '\n')
         print(f"airport.dat已保存到程序目录/output")

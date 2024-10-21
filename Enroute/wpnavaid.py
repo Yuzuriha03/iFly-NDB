@@ -43,13 +43,20 @@ def generate_converted_rows(rows):
         result = f"{Name_str}{Ident:<5}{Type_str:<4}{Latitude_str}{Longtitude_str}{Frequency_str}{final_letter}"
         yield (Latitude, result)
 
-def wpnavaid(conn, start_id):
+def wpnavaid(conn, navdata_path):
 
     if conn:
         cursor = conn.cursor()
-        
+        # 查找 Name = DEXIN YANJI 的记录
+        cursor.execute("SELECT ID FROM navaids WHERE Name = 'DEXIN YANJI'")
+        start_id_row = cursor.fetchone()
+        if start_id_row:
+            start_id = start_id_row[0]
+        else:
+            print("未找到对应的导航台。")
+
         # 查询navadis表格
-        cursor.execute("SELECT ID, Ident, Type, Name, Freq, Channel, Usage, Latitude, Longtitude, Elevation FROM navaids WHERE ID >= ?", (start_id,))
+        cursor.execute("SELECT ID, Ident, Type, Name, Freq, Channel, Usage, Latitude, Longtitude, Elevation FROM navaids WHERE ID > ?", (start_id,))
         rows = cursor.fetchall()
         # 使用生成器来生成转换后的行
         converted_rows = list(generate_converted_rows(rows))
@@ -58,10 +65,10 @@ def wpnavaid(conn, start_id):
         print("转换成功")
     
         # 保存结果到文件   
-        if not os.path.exists('output/'):
-            os.makedirs('output/')
-        with open('output/wpnavaid.txt', 'w') as file:
+        if not os.path.exists('{navdata_path}/Supplemental'):
+            os.makedirs('{navdata_path}/Supplemental')
+        with open('{navdata_path}/Supplemental/wpnavaid.txt', 'w') as file:
             for _, result in converted_rows:
                 file.write(result + '\n')
     
-        print(f"wpnavaid.txt已保存到程序目录/output")
+        print(f"wpnavaid.txt已保存到{navdata_path}/Supplemental")

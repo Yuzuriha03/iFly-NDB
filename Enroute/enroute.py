@@ -20,34 +20,38 @@ def get_file_path(prompt, file_extension):
             return file_path
         else:
             print(f"文件路径无效或不是一个{file_extension}文件，请重新输入。")
-        
-def get_start_ids():
-    while True:
-        user_input = input("请输入要转换数据的起始AirportID，起始NavaidID和起始WaypointID，用空格分隔三者：")
-        ids = user_input.split()
-        if len(ids) == 3 and all(id.isdigit() for id in ids):
-            start_airport_id = int(ids[0])
-            start_navaid_id = int(ids[1])
-            start_waypoint_id = int(ids[2])
-            return start_airport_id, start_navaid_id, start_waypoint_id
-        else:
-            print("请输入有效的数字，并用空格分隔！")
 
 def enroute(conn, file1, csv):
-    # 用户指定的开始转换的ID
-    start_airport_id, start_navaid_id, start_waypoint_id = get_start_ids()
-    start_time = time.time()
+    if conn:
+        start_time = time.time()
+        cursor = conn.cursor()
+        # 查找 ICAO = ZYYJ 的记录
+        cursor.execute("SELECT ID FROM airports WHERE ICAO = 'ZYYJ'")
+        start_id_row = cursor.fetchone()
+        
+        if start_id_row:
+            start_id = start_id_row[0]  # 提取ZYYJ对应的 AirportID 值
+            # 用户指定的开始转换的ID
+            start_airport_id = start_id + 1
+        else:
+            print("未找到对应的机场。")
+        
+        navdata_path = os.path.dirname(file1)
+        navdata_path = os.path.join(navdata_path, '..')
+        navdata_path = os.path.abspath(navdata_path)
 
-    airport(conn, start_airport_id)
-    supp(conn, start_airport_id)
-    input_time = wpnavapt(conn, start_airport_id)
-    wpnavaid(conn, start_navaid_id)
-    wpnavfix(conn, start_waypoint_id)
-    file2 = wpnavrte(conn, csv)
-    check_route(file1, file2)
-    inser_route(file1, file2)
-    order_route(file1)
-    
-    end_time = time.time()
-    run_time = end_time - start_time - input_time
-    print(f"Enroute数据转换完毕，用时：{round(run_time,3)}秒")
+        airport(conn, start_airport_id, navdata_path)
+        supp(conn, start_airport_id, navdata_path)
+        input_time = wpnavapt(conn, start_airport_id, navdata_path)
+        wpnavaid(conn, navdata_path)
+        wpnavfix(conn, navdata_path)
+        file2 = wpnavrte(conn, csv)
+        check_route(file1, file2)
+        inser_route(file1, file2)
+        order_route(file1)
+        
+        end_time = time.time()
+        run_time = end_time - start_time - input_time
+        print(f"Enroute数据转换完毕，用时：{round(run_time,3)}秒")
+
+        # return navdata_path
