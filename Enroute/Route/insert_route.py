@@ -67,7 +67,7 @@ TEST 003 TEST3 33.447742 135.794495
     with open(file_path, 'w') as file:
         file.write(sample_text)
 
-def inser_route(file1, file2):
+def insert_route(file1, file2):
     
     file1_dict = read_file_to_dict(file1)
     file2_dict = read_file_to_dict(file2)
