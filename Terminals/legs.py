@@ -3,6 +3,7 @@ warnings.filterwarnings('ignore')
 import os
 import pandas as pd
 import re
+import shutil
 from Terminals.list import list_generate
 import concurrent.futures
 import time
@@ -109,14 +110,24 @@ def terminals(conn, navdata_path):
     # 获取用户指定的起止 TerminalID
     start_terminal_id, end_terminal_id = get_terminal_ids()
     start_time = time.time()
+    icao_prefixes = ('VQPR', 'ZB', 'ZG', 'ZH', 'ZJ', 'ZL', 'ZP', 'ZS', 'ZU', 'ZW')
+    allowed_extensions = ('.sid', '.sidtrs', '.app', '.apptrs', '.star', '.startrs')
+    permanent_path = os.path.join(navdata_path, "Permanent")
+    supplemental_path_base = os.path.join(navdata_path, 'Supplemental')
+    for root, _, files in os.walk(permanent_path):  #把现有的进离场数据复制到Supplemental目录下
+        for file in files:
+            if file.startswith(icao_prefixes) and file.endswith(allowed_extensions):
+                relative_path = os.path.relpath(os.path.join(root, file), permanent_path)
+                supplemental_path = os.path.join(supplemental_path_base, relative_path)
+                os.makedirs(os.path.dirname(supplemental_path), exist_ok=True)
+                shutil.copy(os.path.join(root, file), supplemental_path)
     # 建立航段字典用于查询
-    data = list_generate(conn, start_terminal_id, end_terminal_id)
+    data = list_generate(conn, start_terminal_id, end_terminal_id, navdata_path)
     with concurrent.futures.ProcessPoolExecutor() as executor:
         futures = []
-        for root, dirs, files in os.walk(f"{navdata_path}/Permanent"):
-
+        for root, dirs, files in os.walk(f"{navdata_path}\\Supplemental"):
             for file in files:
-                futures.append(executor.submit(process_file, file, root, data))
+                    futures.append(executor.submit(process_file, file, root, data))
         for future in concurrent.futures.as_completed(futures):
             future.result()
     end_time = time.time()

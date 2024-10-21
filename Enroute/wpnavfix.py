@@ -44,7 +44,7 @@ def wpnavfix(conn, navdata_path):
         converted_rows.sort(key=lambda x: x[0])
         
         # 保存结果到文件
-        output_folder = f"{navdata_path}/Supplemental"
+        output_folder = f"{navdata_path}\\Supplemental"
         if not os.path.exists(output_folder):
             os.makedirs(output_folder)
         
@@ -53,4 +53,4 @@ def wpnavfix(conn, navdata_path):
             for _, result in converted_rows:
                 file.write(result + '\n')
         
-        print(f"wpnavfix已保存到{navdata_path}/Supplemental")
+        print(f"wpnavfix已保存到{output_file_path}")

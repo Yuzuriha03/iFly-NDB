@@ -16,7 +16,7 @@ def generate_transitions(data):
                 'Rwy': row.Terminal
             }
     
-def get_terminals(conn, start_terminal_id, end_terminal_id):
+def get_terminals(conn, start_terminal_id, end_terminal_id, navdata_path):
     
     merged_data = generate_merged_data(conn, start_terminal_id, end_terminal_id)
     
@@ -43,8 +43,8 @@ def get_terminals(conn, start_terminal_id, end_terminal_id):
     terminals = pd.concat([transitions, terminals], ignore_index=True)
     
     # 确保输出目录存在
-    os.makedirs('output/SID', exist_ok=True)
-    os.makedirs('output/STAR', exist_ok=True)
+    os.makedirs(f'{navdata_path}Supplemental\\SID', exist_ok=True)
+    os.makedirs(f'{navdata_path}\\Supplemental\\STAR', exist_ok=True)
     
     return terminals, merged_data
 
@@ -72,20 +72,20 @@ def parse_existing_file(filename):
     
     return proc_dict, seqn + 1
 
-def write_to_file(icao, proc, data):
+def write_to_file(icao, proc, data, navdata_path):
     if proc == 2:
-        filename = f"output/SID/{icao}.sid"
+        filename = f"{navdata_path}\\Supplemental\\SID\\{icao}.sid"
     elif proc == 1:
-        filename = f"output/STAR/{icao}.star"
+        filename = f"{navdata_path}\\Supplemental\\STAR\\{icao}.star"
     elif proc == 3:
-        filename = f"output/STAR/{icao}.app"
+        filename = f"{navdata_path}\\Supplemental\\STAR\\{icao}.app"
     elif proc == '6':
-        filename = f"output/SID/{icao}.sidtrs"
+        filename = f"{navdata_path}\\Supplemental\\SID\\{icao}.sidtrs"
     elif proc == 'A':
-        filename = f"output/STAR/{icao}.apptrs"
+        filename = f"{navdata_path}\\Supplemental\\STAR\\{icao}.apptrs"
     else:
         return
-
+    os.makedirs(os.path.dirname(filename), exist_ok=True)
     proc_dict, seqn = parse_existing_file(filename)
     
     if not os.path.exists(filename):
@@ -140,11 +140,11 @@ def write_to_file(icao, proc, data):
         f.truncate()
         f.writelines(lines)
         
-def list_generate(conn, start_terminal_id, end_terminal_id):
-    terminals, merged_data = get_terminals(conn, start_terminal_id, end_terminal_id)
+def list_generate(conn, start_terminal_id, end_terminal_id, navdata_path):
+    terminals, merged_data = get_terminals(conn, start_terminal_id, end_terminal_id, navdata_path)
     for icao in terminals['ICAO'].unique():
         for proc in [1, 2, 3, '6', 'A']:
             data = terminals[(terminals['ICAO'] == icao) & (terminals['Proc'] == proc)]
             if not data.empty:
-                write_to_file(icao, proc, data)
+                write_to_file(icao, proc, data, navdata_path)
     return merged_data

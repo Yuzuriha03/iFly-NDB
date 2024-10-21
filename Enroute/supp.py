@@ -22,7 +22,7 @@ def supp(conn, start_apt_id, navdata_path):
             file_content += f"[Transition_Level]\nAltitude={transition_level}\n"
             
             # 保存结果到文件
-            output_folder = f"{navdata_path}/Supplemental/Supp"
+            output_folder = f"{navdata_path}\\Supplemental\\Supp"
             if not os.path.exists(output_folder):
                 os.makedirs(output_folder)
             
@@ -30,4 +30,4 @@ def supp(conn, start_apt_id, navdata_path):
             with open(output_file_path, 'w', encoding='utf-8') as file:
                 file.write(file_content)
         
-        print(f"supp文件保存到{navdata_path}/Supplemental/Supp")
+        print(f"supp文件已保存到{output_folder}")

@@ -12,7 +12,10 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 
 def get_file_path(prompt, file_extension):
     while True:
-        file_path = input(prompt).strip().strip('\'"&')  # 去除首尾空格引号&
+        file_path = input(prompt).strip()  # 去除首尾空格
+        # 去掉开头的特殊字符和引号
+        file_path = file_path.lstrip("'\"& ").rstrip("'\" ")
+        print(file_path)
         if os.path.exists(file_path) and file_path.endswith(file_extension):
             logging.info(f"选择的文件: {file_path}")
             return file_path

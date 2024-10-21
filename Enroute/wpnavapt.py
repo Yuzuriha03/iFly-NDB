@@ -117,7 +117,7 @@ def wpnavapt(conn, start_apt_id, navdata_path):
         results.sort(key=lambda x: (x[2], x[3]))
         converted_rows = list(generate_result_strings(results))
         
-        output_folder = f"{navdata_path}/Supplemental"
+        output_folder = f"{navdata_path}\\Supplemental"
         if not os.path.exists(output_folder):
             os.makedirs(output_folder)
         output_file_path = os.path.join(output_folder, 'wpnavapt.txt')

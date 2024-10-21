@@ -44,5 +44,5 @@ def airport(conn, start_id, navdata_path):
         with open(output_file_path, 'w') as file:
             for _, result in converted_rows:
                 file.write(result + '\n')
-        print(f"airport.dat已保存到{navdata_path}/Supplemental")
+        print(f"airport.dat已保存到{output_file_path}")
         
