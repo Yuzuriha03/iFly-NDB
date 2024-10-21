@@ -33,7 +33,7 @@ def generate_merged_data(conn, start_terminal_id, end_terminal_id):
     for index, row in terminals.iterrows():
         if pd.isnull(row['Rwy']) or row['Rwy'].strip() == '':
             while True:
-                user_input = input(f"Rwy 值为空，请为机场 {row['ICAO']} 手动输入 Rwy 值（仅限数字和C、L、R）：").strip()
+                user_input = input(f"Rwy 值为空，请为 {row['ICAO']}.{row['Name']} 手动输入 Rwy 值：").strip()
                 if re.match(r'^[0-9CLR]+$', user_input, re.IGNORECASE):
                     terminals.at[index, 'Rwy'] = user_input.upper()
                     break
