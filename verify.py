@@ -22,14 +22,14 @@ def compare_directories(dir1, dir2):
                 if diffs:
                     differences.extend(diffs)
             else:
-                differences.append(f"File {file2_path} does not exist.")
+                differences.append(f"文件 {file2_path} 不存在。")
     
     for root2, _, files2 in os.walk(dir2):
         for file2 in files2:
             file2_path = os.path.join(root2, file2)
             file1_path = file2_path.replace(dir2, dir1, 1)
             if not os.path.exists(file1_path):
-                differences.append(f"File {file1_path} does not exist.")
+                differences.append(f"文件 {file1_path} 不存在。")
     
     return differences
 
@@ -39,8 +39,8 @@ if __name__ == "__main__":
     differences = compare_directories(dir1, dir2)
     
     if differences:
-        print('Directories are different. Here are the differences:')
+        print('两文件夹存在不同，以下是不同：')
         for line in differences:
             print(line)
     else:
-        print('Directories are identical.')
+        print('两文件夹完全相同。')
