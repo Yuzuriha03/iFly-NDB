@@ -9,7 +9,7 @@ from Enroute.wpnavaid import wpnavaid
 from Enroute.wpnavfix import wpnavfix
 from Enroute.Route.wpnavrte import wpnavrte
 from Enroute.Route.check_route import check_route
-from Enroute.Route.insert_route import inser_route
+from Enroute.Route.insert_route import insert_route
 from Enroute.Route.order_route import order_route
 
 def get_file_path(prompt, file_extension):
@@ -47,7 +47,7 @@ def enroute(conn, file1, csv):
         wpnavfix(conn, navdata_path)
         file2 = wpnavrte(conn, csv, navdata_path)
         check_route(file1, file2)
-        inser_route(file1, file2)
+        insert_route(file1, file2)
         order_route(file1)
         
         end_time = time.time()
