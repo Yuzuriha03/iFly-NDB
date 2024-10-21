@@ -65,9 +65,9 @@ def wpnavaid(conn, navdata_path):
         print("转换成功")
     
         # 保存结果到文件   
-        if not os.path.exists('{navdata_path}/Supplemental'):
-            os.makedirs('{navdata_path}/Supplemental')
-        with open('{navdata_path}/Supplemental/wpnavaid.txt', 'w') as file:
+        if not os.path.exists(f'{navdata_path}/Supplemental'):
+            os.makedirs(f'{navdata_path}/Supplemental')
+        with open(f'{navdata_path}/Supplemental/wpnavaid.txt', 'w') as file:
             for _, result in converted_rows:
                 file.write(result + '\n')
     

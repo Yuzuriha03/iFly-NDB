@@ -157,7 +157,8 @@ def generate_merged_data(conn, start_terminal_id, end_terminal_id):
         
         # 计算高度值
         slope = row['Slope']
-        runway_elevation = runway_row.iloc[0]['Elevation']
+        if not runway_row.empty:
+            runway_elevation = runway_row.iloc[0]['Elevation']
         if pd.notnull(slope):
             n = 1
             previous_altitude_str = merged_data.at[index - n, 'Altitude']
