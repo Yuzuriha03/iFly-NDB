@@ -1,6 +1,7 @@
 import warnings
 warnings.filterwarnings('ignore')
 import os
+import re
 import sqlite3
 import time
 import logging
@@ -52,6 +53,44 @@ def get_db_connection(prompt):
                         
             return conn  # 返回有效的数据库连接对象
 
+def get_route_file():
+    paths_to_check = {
+        "Microsoft Store版": os.path.expandvars(r'%LocalAppData%\Packages\Microsoft.FlightSimulator_8wekyb3d8bbwe\LocalCache\UserCfg.opt'),
+        "Steam版": os.path.expandvars(r'%AppData%\Microsoft Flight Simulator\UserCfg.opt')
+    }
+    
+    route_files = {}
+
+    for version, user_cfg_path in paths_to_check.items():
+        if os.path.exists(user_cfg_path):
+            with open(user_cfg_path, 'r') as file:
+                for line in file:
+                    if 'InstalledPackagesPath' in line:
+                        match = re.search(r'"(.*?)"', line)
+                        route_file = match.group(1)
+                        route_file = os.path.join(route_file, 'Community\\ifly-aircraft-737max8\\Data\\navdata\\Permanent\\WPNAVRTE.txt')
+                        route_files[version] = route_file
+                        break
+    
+    if route_files:
+        available_files = {version: rf for version, rf in route_files.items() if os.path.exists(rf)}
+        
+        if len(available_files) > 1:
+            print("找到多个航路文件目录:")
+            for i, (version, rf) in enumerate(available_files.items(), 1):
+                print(f"{i}: {version} 目录 - {rf}")
+            choice = int(input("请选择使用的路径 (输入数字): ")) - 1
+            route_file = list(available_files.values())[choice]
+        else:
+            route_file = list(available_files.values())[0]
+        
+        logging.info(f"程序已自动找到iFly航路文件目录: {route_file}")
+        return route_file
+    else:
+        logging.warning("无法找到iFly航路文件目录，请手动指定路径：")
+        route_file = get_file_path("(一般位于Community\\ifly-aircraft-737max8\\Data\\navdata\\Permanent\\WPNAVRTE.txt)：", "WPNAVRTE.txt")
+        return route_file
+
 def countdown_timer(seconds):
     while seconds:
         print(f"处理结束，程序将在 {seconds} 秒钟后关闭", end='', flush=True)
@@ -63,9 +102,8 @@ def countdown_timer(seconds):
 if __name__ == "__main__":
     # 连接到数据库
     conn = get_db_connection("请输入Fenix的nd.db3文件路径：")
-    file1 = get_file_path("请输入iFly航路文件路径\n(位于Community\\ifly-aircraft-737max8\\Data\\navdata\\Permanent\\WPNAVRTE.txt)：", "WPNAVRTE.txt")
     csv = get_file_path("请输入NAIP RTE_SEG.csv文件路径：", "RTE_SEG.csv")
-    
+    file1 = get_route_file()
     logging.info("开始处理Enroute部分")
     navdata_path = enroute(conn, file1, csv)
     logging.info("开始处理Terminals部分")
