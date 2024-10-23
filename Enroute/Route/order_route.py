@@ -1,6 +1,7 @@
-import warnings
-warnings.filterwarnings('ignore')
 import os
+import warnings
+
+warnings.filterwarnings('ignore')
 
 def read_file_to_dict(file_path):
     data_dict = {}
@@ -13,9 +14,7 @@ def read_file_to_dict(file_path):
                 fix_ident = parts[2]
                 latitude = parts[3]
                 longitude = parts[4]
-                if route_ident not in data_dict:
-                    data_dict[route_ident] = []
-                data_dict[route_ident].append({
+                data_dict.setdefault(route_ident, []).append({
                     'Segment_Number': segment_number,
                     'Fix_Ident': fix_ident,
                     'Latitude': latitude,
@@ -24,7 +23,7 @@ def read_file_to_dict(file_path):
     return data_dict
 
 def renumber_segments(data_dict):
-    for route_ident, segments in data_dict.items():
+    for segments in data_dict.values():
         for i, segment in enumerate(segments, start=1):
             segment['Segment_Number'] = f'{i:03}'
     return data_dict
@@ -37,10 +36,7 @@ def write_dict_to_file(data_dict, file_path):
     print(f"已将NAIP航路添加到 {os.path.abspath(file_path)}")
 
 def sort_data_dict(data_dict):
-    sorted_data = {}
-    for route_ident in sorted(data_dict.keys()):
-        sorted_data[route_ident] = data_dict[route_ident]
-    return sorted_data
+    return {k: data_dict[k] for k in sorted(data_dict)}
 
 def order_route(file1):
     # 主程序
