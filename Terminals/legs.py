@@ -90,19 +90,31 @@ def process_file(file, root, data):
         f.truncate()
         f.writelines(lines)
 
-def terminals(conn, navdata_path, start_terminal_id, end_terminal_id):
-    start_time = time.time()
+def copy_file_if_not_exists(src_file, dest_file):
+    if os.path.exists(dest_file):
+        return  # 如果Supplemental目录下已存在同名文件则跳过
+    os.makedirs(os.path.dirname(dest_file), exist_ok=True)
+    shutil.copy(src_file, dest_file)
+    
+def process_files(root, files, permanent_path, supplemental_path_base):
     icao_prefixes = ('VQPR', 'ZB', 'ZG', 'ZH', 'ZJ', 'ZL', 'ZP', 'ZS', 'ZU', 'ZW')
     allowed_extensions = ('.sid', '.sidtrs', '.app', '.apptrs', '.star', '.startrs')
+    for file in files:
+        if file.startswith(icao_prefixes) and file.endswith(allowed_extensions):
+            relative_path = os.path.relpath(os.path.join(root, file), permanent_path)
+            supplemental_path = os.path.join(supplemental_path_base, relative_path)
+            copy_file_if_not_exists(os.path.join(root, file), supplemental_path)
+
+def terminals(conn, navdata_path, start_terminal_id, end_terminal_id):
+    start_time = time.time()
     permanent_path = os.path.join(navdata_path, "Permanent")
     supplemental_path_base = os.path.join(navdata_path, 'Supplemental')
-    for root, _, files in os.walk(permanent_path):  #把现有的进离场数据复制到Supplemental目录下
-        for file in files:
-            if file.startswith(icao_prefixes) and file.endswith(allowed_extensions):
-                relative_path = os.path.relpath(os.path.join(root, file), permanent_path)
-                supplemental_path = os.path.join(supplemental_path_base, relative_path)
-                os.makedirs(os.path.dirname(supplemental_path), exist_ok=True)
-                shutil.copy(os.path.join(root, file), supplemental_path)
+    with concurrent.futures.ProcessPoolExecutor() as executor:
+        futures = []
+        for root, _, files in os.walk(permanent_path):  # 把现有的进离场数据复制到Supplemental目录下
+            futures.append(executor.submit(process_files, root, files, permanent_path, supplemental_path_base))
+        for future in concurrent.futures.as_completed(futures):
+            future.result()
     # 建立航段字典用于查询
     data = list_generate(conn, start_terminal_id, end_terminal_id, navdata_path)
     with concurrent.futures.ProcessPoolExecutor() as executor:
