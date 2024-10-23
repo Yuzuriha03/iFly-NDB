@@ -81,15 +81,18 @@ def get_route_file():
                 print(f"{i}: {version} 目录 - {rf}")
             choice = int(input("请选择使用的路径 (输入数字): ")) - 1
             route_file = list(available_files.values())[choice]
+            navdata_path = os.path.dirname(os.path.dirname(route_file))
         else:
             route_file = list(available_files.values())[0]
+            navdata_path = os.path.dirname(os.path.dirname(route_file))
         
         logging.info(f"程序已自动找到iFly航路文件目录: {route_file}")
-        return route_file
+        return route_file, navdata_path
     else:
         logging.warning("无法找到iFly航路文件目录，请手动指定路径：")
-        route_file = get_file_path("(一般位于Community\\ifly-aircraft-737max8\\Data\\navdata\\Permanent\\WPNAVRTE.txt)：", "WPNAVRTE.txt")
-        return route_file
+        route_file = get_file_path("(位于Community\\ifly-aircraft-737max8\\Data\\navdata\\Permanent\\WPNAVRTE.txt)：", "WPNAVRTE.txt")
+        navdata_path = os.path.dirname(os.path.dirname(route_file))
+        return route_file, navdata_path
 
 def get_terminal_ids():
     while True:
@@ -119,11 +122,11 @@ if __name__ == "__main__":
     # 连接到数据库
     conn = get_db_connection("请输入Fenix的nd.db3文件路径：")
     csv = get_file_path("请输入NAIP RTE_SEG.csv文件路径：", "RTE_SEG.csv")
-    file1 = get_route_file()
+    route_file, navdata_path = get_route_file()
+    # 获取起止 TerminalID
     start_terminal_id, end_terminal_id = get_terminal_ids()
     logging.info("开始处理Enroute部分")
-    # 获取用户指定的起止 TerminalID
-    navdata_path = enroute(conn, file1, csv)
+    enroute(conn, route_file, navdata_path, csv)
     logging.info("开始处理Terminals部分")
     terminals(conn, navdata_path, start_terminal_id, end_terminal_id)
     countdown_timer(10)

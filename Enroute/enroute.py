@@ -21,7 +21,7 @@ def get_file_path(prompt, file_extension):
         else:
             print(f"文件路径无效或不是一个{file_extension}文件，请重新输入。")
 
-def enroute(conn, file1, csv):
+def enroute(conn, route_file, navdata_path, csv):
     if conn:
         start_time = time.time()
         cursor = conn.cursor()
@@ -35,10 +35,6 @@ def enroute(conn, file1, csv):
             start_airport_id = start_id + 1
         else:
             print("未找到对应的机场。")
-        
-        navdata_path = os.path.dirname(file1)
-        navdata_path = os.path.join(navdata_path, '..')
-        navdata_path = os.path.abspath(navdata_path)
 
         airport(conn, start_airport_id, navdata_path)
         supp(conn, start_airport_id, navdata_path)
@@ -46,12 +42,10 @@ def enroute(conn, file1, csv):
         wpnavaid(conn, navdata_path)
         wpnavfix(conn, navdata_path)
         file2 = wpnavrte(conn, csv, navdata_path)
-        check_route(file1, file2)
-        insert_route(file1, file2)
-        order_route(file1)
+        check_route(route_file, file2)
+        insert_route(route_file, file2)
+        order_route(route_file)
         
         end_time = time.time()
         run_time = end_time - start_time - input_time
         print(f"Enroute数据转换完毕，用时：{round(run_time,3)}秒")
-
-        return navdata_path
