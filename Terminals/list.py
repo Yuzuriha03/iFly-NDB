@@ -142,7 +142,7 @@ def write_to_file(icao, proc, data, navdata_path):
         
 def list_generate(conn, start_terminal_id, end_terminal_id, navdata_path):
     terminals, merged_data = get_terminals(conn, start_terminal_id, end_terminal_id, navdata_path)
-    with concurrent.futures.ThreadPoolExecutor() as executor:
+    with concurrent.futures.ProcessPoolExecutor() as executor:
         futures = []
         for icao in terminals['ICAO'].unique():
             for proc in [1, 2, 3, '6', 'A']:

@@ -111,7 +111,7 @@ def terminals(conn, navdata_path, start_terminal_id, end_terminal_id):
     permanent_path = os.path.join(navdata_path, "Permanent")
     supplemental_path_base = os.path.join(navdata_path, 'Supplemental')
     
-    with concurrent.futures.ThreadPoolExecutor() as executor:
+    with concurrent.futures.ProcessPoolExecutor() as executor:
         futures = []
         for root, _, files in os.walk(permanent_path):  # 把现有的进离场数据复制到Supplemental目录下
             futures.append(executor.submit(process_files, root, files, permanent_path, supplemental_path_base))
@@ -121,7 +121,7 @@ def terminals(conn, navdata_path, start_terminal_id, end_terminal_id):
     # 建立航段字典用于查询
     data = list_generate(conn, start_terminal_id, end_terminal_id, navdata_path)
     
-    with concurrent.futures.ThreadPoolExecutor() as executor:
+    with concurrent.futures.ProcessPoolExecutor() as executor:
         futures = []
         for root, dirs, files in os.walk(f"{navdata_path}\\Supplemental"):
             for file in files:
