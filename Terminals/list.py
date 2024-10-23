@@ -2,6 +2,7 @@ import os
 import re
 import warnings
 import pandas as pd
+import concurrent.futures
 from Terminals.merged_data import generate_merged_data
 
 warnings.filterwarnings('ignore')
@@ -74,17 +75,15 @@ def parse_existing_file(filename):
     return proc_dict, seqn + 1
 
 def write_to_file(icao, proc, data, navdata_path):
-    if proc == 2:
-        filename = f"{navdata_path}\\Supplemental\\SID\\{icao}.sid"
-    elif proc == 1:
-        filename = f"{navdata_path}\\Supplemental\\STAR\\{icao}.star"
-    elif proc == 3:
-        filename = f"{navdata_path}\\Supplemental\\STAR\\{icao}.app"
-    elif proc == '6':
-        filename = f"{navdata_path}\\Supplemental\\SID\\{icao}.sidtrs"
-    elif proc == 'A':
-        filename = f"{navdata_path}\\Supplemental\\STAR\\{icao}.apptrs"
-    else:
+    filename_mapping = {
+        2: f"{navdata_path}\\Supplemental\\SID\\{icao}.sid",
+        1: f"{navdata_path}\\Supplemental\\STAR\\{icao}.star",
+        3: f"{navdata_path}\\Supplemental\\STAR\\{icao}.app",
+        '6': f"{navdata_path}\\Supplemental\\SID\\{icao}.sidtrs",
+        'A': f"{navdata_path}\\Supplemental\\STAR\\{icao}.apptrs"
+    }
+    filename = filename_mapping.get(proc)
+    if not filename:
         return
     os.makedirs(os.path.dirname(filename), exist_ok=True)
     proc_dict, seqn = parse_existing_file(filename)
@@ -143,9 +142,13 @@ def write_to_file(icao, proc, data, navdata_path):
         
 def list_generate(conn, start_terminal_id, end_terminal_id, navdata_path):
     terminals, merged_data = get_terminals(conn, start_terminal_id, end_terminal_id, navdata_path)
-    for icao in terminals['ICAO'].unique():
-        for proc in [1, 2, 3, '6', 'A']:
-            data = terminals[(terminals['ICAO'] == icao) & (terminals['Proc'] == proc)]
-            if not data.empty:
-                write_to_file(icao, proc, data, navdata_path)
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        futures = []
+        for icao in terminals['ICAO'].unique():
+            for proc in [1, 2, 3, '6', 'A']:
+                data = terminals[(terminals['ICAO'] == icao) & (terminals['Proc'] == proc)]
+                if not data.empty:
+                    futures.append(executor.submit(write_to_file, icao, proc, data, navdata_path))
+        for future in concurrent.futures.as_completed(futures):
+            future.result()
     return merged_data

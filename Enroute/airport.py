@@ -6,17 +6,8 @@ warnings.filterwarnings('ignore')
 def generate_converted_rows(rows):
     for row in rows:
         ICAO, Latitude, Longtitude = row
-        Latitude_str = format(Latitude, '.6f')
-        Longtitude_str = format(Longtitude, '.6f')
-        
-        # 检查并调整Longtitude_str长度
-        if len(Longtitude_str) < 11:
-            Longtitude_str = Longtitude_str.rjust(11)
-        # 检查并调整Latitude_str长度
-        if len(Latitude_str) < 10:
-            Latitude_str = Latitude_str.rjust(10)
-        
-        # 格式化结果
+        Longtitude_str = f"{Longtitude:.6f}".rjust(11)
+        Latitude_str = f"{Latitude:.6f}".rjust(10)
         result = f"{ICAO}{Latitude_str}{Longtitude_str}"
         yield (Latitude, result)
 
@@ -38,10 +29,7 @@ def airport(conn, start_id, navdata_path):
         output_folder = f"{navdata_path}\\Supplemental"
         if not os.path.exists(output_folder):
             os.makedirs(output_folder)
-        
         output_file_path = os.path.join(output_folder, 'airports.dat')
-        if not os.path.exists(output_file_path):
-            os.makedirs(output_file_path)
         with open(output_file_path, 'w') as file:
             for _, result in converted_rows:
                 file.write(result + '\n')
