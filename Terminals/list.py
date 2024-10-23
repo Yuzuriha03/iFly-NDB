@@ -1,9 +1,10 @@
-import warnings
-warnings.filterwarnings('ignore')
 import os
-import pandas as pd
 import re
+import warnings
+import pandas as pd
 from Terminals.merged_data import generate_merged_data
+
+warnings.filterwarnings('ignore')
 
 def generate_transitions(data):
 

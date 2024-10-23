@@ -1,9 +1,10 @@
-import warnings
-warnings.filterwarnings('ignore')
-import math
 import re
+import math
+import warnings
 import pandas as pd
 from geographiclib.geodesic import Geodesic
+
+warnings.filterwarnings('ignore')
 
 def generate_merged_data(conn, start_terminal_id, end_terminal_id):
 

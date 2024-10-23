@@ -1,16 +1,17 @@
-import warnings
-warnings.filterwarnings('ignore')
 import os
 import time
-from Enroute.airport import airport
+import warnings
 from Enroute.supp import supp
-from Enroute.wpnavapt import wpnavapt
+from Enroute.airport import airport
 from Enroute.wpnavaid import wpnavaid
+from Enroute.wpnavapt import wpnavapt
 from Enroute.wpnavfix import wpnavfix
 from Enroute.Route.wpnavrte import wpnavrte
 from Enroute.Route.check_route import check_route
 from Enroute.Route.insert_route import insert_route
 from Enroute.Route.order_route import order_route
+
+warnings.filterwarnings('ignore')
 
 def get_file_path(prompt, file_extension):
 

@@ -1,12 +1,13 @@
-import warnings
-warnings.filterwarnings('ignore')
 import os
 import re
-import sqlite3
 import time
 import logging
+import sqlite3
+import warnings
 from Enroute.enroute import enroute
 from Terminals.legs import terminals
+
+warnings.filterwarnings('ignore')
 
 # 设置日志配置
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')

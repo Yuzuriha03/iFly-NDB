@@ -1,6 +1,7 @@
-import warnings
-warnings.filterwarnings('ignore')
 import os
+import warnings
+
+warnings.filterwarnings('ignore')
 
 def supp(conn, start_apt_id, navdata_path):
     

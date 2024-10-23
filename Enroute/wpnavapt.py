@@ -1,11 +1,12 @@
-import warnings
-warnings.filterwarnings('ignore')
-import datetime
 import os
-import requests
 import time
+import datetime
+import requests
+import warnings
 from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+warnings.filterwarnings('ignore')
 
 def get_declination(lat, lon, date, key):
     url = "https://www.ngdc.noaa.gov/geomag-web/calculators/calculateDeclination"
