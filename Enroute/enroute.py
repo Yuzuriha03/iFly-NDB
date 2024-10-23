@@ -8,8 +8,8 @@ from Enroute.wpnavapt import wpnavapt
 from Enroute.wpnavfix import wpnavfix
 from Enroute.Route.wpnavrte import wpnavrte
 from Enroute.Route.check_route import check_route
-from Enroute.Route.insert_route import insert_route
 from Enroute.Route.order_route import order_route
+from Enroute.Route.insert_route import insert_route
 
 warnings.filterwarnings('ignore')
 
