@@ -91,6 +91,22 @@ def get_route_file():
         route_file = get_file_path("(一般位于Community\\ifly-aircraft-737max8\\Data\\navdata\\Permanent\\WPNAVRTE.txt)：", "WPNAVRTE.txt")
         return route_file
 
+def get_terminal_ids():
+    while True:
+        user_input = input("请输入要转换终端程序集的起始TerminalID和结束TerminalID，用空格分隔二者：")
+        terminal_ids = user_input.split()
+        if len(terminal_ids) == 1 and terminal_ids[0].isdigit():
+            start_terminal_id = int(terminal_ids[0])
+            print("终止ID未输入，将自动转换到数据库中最后一个终端程序")
+            end_terminal_id = 999999999  # 设定终止ID为999999999
+            return start_terminal_id, end_terminal_id
+        elif len(terminal_ids) == 2 and all(id.isdigit() for id in terminal_ids):
+            start_terminal_id = int(terminal_ids[0])
+            end_terminal_id = int(terminal_ids[1])
+            return start_terminal_id, end_terminal_id
+        else:
+            print("请输入有效的数字，并用空格分隔！")
+
 def countdown_timer(seconds):
     while seconds:
         print(f"处理结束，程序将在 {seconds} 秒钟后关闭", end='', flush=True)
@@ -104,8 +120,10 @@ if __name__ == "__main__":
     conn = get_db_connection("请输入Fenix的nd.db3文件路径：")
     csv = get_file_path("请输入NAIP RTE_SEG.csv文件路径：", "RTE_SEG.csv")
     file1 = get_route_file()
+    start_terminal_id, end_terminal_id = get_terminal_ids()
     logging.info("开始处理Enroute部分")
+    # 获取用户指定的起止 TerminalID
     navdata_path = enroute(conn, file1, csv)
     logging.info("开始处理Terminals部分")
-    terminals(conn, navdata_path)
+    terminals(conn, navdata_path, start_terminal_id, end_terminal_id)
     countdown_timer(10)

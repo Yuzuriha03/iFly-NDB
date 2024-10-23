@@ -8,22 +8,6 @@ from Terminals.list import list_generate
 import concurrent.futures
 import time
 
-def get_terminal_ids():
-    while True:
-        user_input = input("请输入要转换终端程序集的起始TerminalID和结束TerminalID，用空格分隔二者：")
-        terminal_ids = user_input.split()
-        if len(terminal_ids) == 1 and terminal_ids[0].isdigit():
-            start_terminal_id = int(terminal_ids[0])
-            print("终止ID未输入，将自动转换到数据库中最后一个终端程序")
-            end_terminal_id = 999999999  # 设定终止ID为999999999
-            return start_terminal_id, end_terminal_id
-        elif len(terminal_ids) == 2 and all(id.isdigit() for id in terminal_ids):
-            start_terminal_id = int(terminal_ids[0])
-            end_terminal_id = int(terminal_ids[1])
-            return start_terminal_id, end_terminal_id
-        else:
-            print("请输入有效的数字，并用空格分隔！")
-
 def parse_files(file, root):
     procedures = {}
     details = {}
@@ -106,9 +90,7 @@ def process_file(file, root, data):
         f.truncate()
         f.writelines(lines)
 
-def terminals(conn, navdata_path):
-    # 获取用户指定的起止 TerminalID
-    start_terminal_id, end_terminal_id = get_terminal_ids()
+def terminals(conn, navdata_path, start_terminal_id, end_terminal_id):
     start_time = time.time()
     icao_prefixes = ('VQPR', 'ZB', 'ZG', 'ZH', 'ZJ', 'ZL', 'ZP', 'ZS', 'ZU', 'ZW')
     allowed_extensions = ('.sid', '.sidtrs', '.app', '.apptrs', '.star', '.startrs')
