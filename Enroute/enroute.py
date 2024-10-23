@@ -13,15 +13,6 @@ from Enroute.Route.insert_route import insert_route
 
 warnings.filterwarnings('ignore')
 
-def get_file_path(prompt, file_extension):
-
-    while True:
-        file_path = input(prompt).strip().strip('\'"')  # 去除首尾空格和引号
-        if os.path.exists(file_path) and file_path.endswith(file_extension):
-            return file_path
-        else:
-            print(f"文件路径无效或不是一个{file_extension}文件，请重新输入。")
-
 def enroute(conn, route_file, navdata_path, csv):
     if conn:
         start_time = time.time()
