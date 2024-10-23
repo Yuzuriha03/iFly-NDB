@@ -94,7 +94,7 @@ def wpnavapt(conn, start_apt_id, navdata_path):
             "SELECT ID, Name, ICAO, Latitude, Longtitude FROM airports WHERE ID >= ?", 
             (start_apt_id,)
         )
-        airport_rows = cursor.fetchall
+        airport_rows = cursor.fetchall()  # 确保是列表
         
         failed_runways = []
         total_airports = len(airport_rows)
