@@ -102,7 +102,7 @@ def get_terminal_ids():
         if len(terminal_ids) == 1 and terminal_ids[0].isdigit():
             start_terminal_id = int(terminal_ids[0])
             print("终止ID未输入，将自动转换到数据库中最后一个终端程序")
-            end_terminal_id = 999999999  # 设定终止ID为999999999
+            end_terminal_id = 99999999  # 设定终止ID为99999999
             return start_terminal_id, end_terminal_id
         elif len(terminal_ids) == 2 and all(id.isdigit() for id in terminal_ids):
             start_terminal_id = int(terminal_ids[0])
