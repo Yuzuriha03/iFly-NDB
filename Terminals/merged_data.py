@@ -12,7 +12,7 @@ def generate_merged_data(conn, start_terminal_id, end_terminal_id):
     airport_query = """
     SELECT ID, ICAO FROM Airports 
     WHERE ICAO = 'VQPR' OR (ICAO LIKE 'ZB%' OR ICAO LIKE 'ZG%' OR ICAO LIKE 'ZH%' OR ICAO LIKE 'ZJ%' 
-    OR ICAO LIKE 'ZL%' OR ICAO LIKE 'ZP%' OR ICAO LIKE 'ZS%' OR ICAO LIKE 'ZU%' OR ICAO LIKE 'ZW%')
+    OR ICAO LIKE 'ZL%' OR ICAO LIKE 'ZP%' OR ICAO LIKE 'ZS%' OR ICAO LIKE 'ZU%' OR ICAO LIKE 'ZW%' OR ICAO LIKE 'ZY%')
     """
     airports = pd.read_sql_query(airport_query, conn)
     

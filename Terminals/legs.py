@@ -98,7 +98,7 @@ def copy_file_if_not_exists(src_file, dest_file):
     shutil.copy(src_file, dest_file)
 
 def process_files(root, files, permanent_path, supplemental_path_base):
-    icao_prefixes = ('VQPR', 'ZB', 'ZG', 'ZH', 'ZJ', 'ZL', 'ZP', 'ZS', 'ZU', 'ZW')
+    icao_prefixes = ('VQPR', 'ZB', 'ZG', 'ZH', 'ZJ', 'ZL', 'ZP', 'ZS', 'ZU', 'ZW', 'ZY')
     allowed_extensions = ('.sid', '.sidtrs', '.app', '.apptrs', '.star', '.startrs')
     for file in files:
         if file.startswith(icao_prefixes) and file.endswith(allowed_extensions):
