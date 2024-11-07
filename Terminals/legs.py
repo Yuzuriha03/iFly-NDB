@@ -45,7 +45,7 @@ def parse_files(file, root):
 def legs_generate(icao, procedures, details, data):
     results = []
     current_transition = None
-    seqno = 1
+    seqno = 0
     for index, row in data.iterrows():
         if row['ICAO'] == icao:
             if row['Type'] == '6' or row['Type'] == 'A':
