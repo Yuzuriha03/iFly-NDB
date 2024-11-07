@@ -59,7 +59,7 @@ def parse_existing_file(filename):
         lines = f.readlines()
     
     proc_dict = {}
-    seqn = 1
+    seqn = 0
     for line in lines:
         if line.startswith("[list]"):
             continue
