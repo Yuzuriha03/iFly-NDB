@@ -30,17 +30,6 @@ def generate_merged_data(conn, start_terminal_id, end_terminal_id):
     WHERE ID BETWEEN ? AND ? AND AirportID IN ({', '.join(map(str, airports['ID'].tolist()))})
     """, conn, params=(start_terminal_id, end_terminal_id))
     
-    ## 检查并处理空的 Rwy 字段
-    #for index, row in terminals.iterrows():
-    #    if pd.isnull(row['Rwy']) or row['Rwy'].strip() == '':
-    #        while True:
-    #            user_input = input(f"{row['ICAO']}.{row['Name']} 对应的Rwy值为空，请手动输入 Rwy 值：").strip()
-    #            if re.match(r'^\d{2}$', user_input) or re.match(r'^\d{2}[CLR]$', user_input, re.IGNORECASE):
-    #                terminals.at[index, 'Rwy'] = user_input.upper()
-    #                break
-    #            else:
-    #                print("输入无效，请重新输入有效的跑道编号。")
-    
     # 查询符合条件的 TerminalLegs
     terminal_ids = ', '.join(map(str, terminals['ID'].tolist()))
     terminal_legs_query = f"""
@@ -194,4 +183,72 @@ def generate_merged_data(conn, start_terminal_id, end_terminal_id):
     }
     update_names(merged_data, replacements)
 
+    # ------------------ 新增处理 Rwy 字段为空的逻辑 ------------------
+    # 情况1: Transition以RW开头
+    mask_rwy = merged_data['Rwy'].isnull() & merged_data['Transition'].str.startswith('RW', na=False)
+    merged_data.loc[mask_rwy, 'Rwy'] = merged_data.loc[mask_rwy, 'Transition'].str[2:]
+    merged_data.loc[mask_rwy, 'Type'] = 5  # 设置Type为5
+
+    # 情况2: Transition为ALL
+    mask_all = (merged_data['Transition'] == 'ALL') & merged_data['Rwy'].isnull()
+    rows_to_process = merged_data[mask_all].copy()
+    new_rows = pd.DataFrame()
+
+    for index, row in rows_to_process.iterrows():
+        icao = row['ICAO']
+        terminal = row['Terminal']
+        
+        # 获取同组其他行的Transition唯一值
+        same_group = merged_data[
+            (merged_data['ICAO'] == icao) &
+            (merged_data['Terminal'] == terminal) &
+            (merged_data.index != index)
+        ]
+        transitions = same_group['Transition'].dropna().unique()
+        
+        # 过滤以RW开头的Transition并提取跑道号
+        rwy_values = [t[2:] for t in transitions if str(t).startswith('RW')]
+        
+        if rwy_values:
+            # 复制当前行并填充跑道号
+            dupes = pd.DataFrame([row] * len(rwy_values))
+            dupes['Rwy'] = rwy_values
+            dupes['Type'] = 5  # 设置Type为5
+            new_rows = pd.concat([new_rows, dupes], ignore_index=True)
+
+    # 删除原始ALL行并添加新行
+    merged_data = merged_data.drop(rows_to_process.index)
+    merged_data = pd.concat([merged_data, new_rows], ignore_index=True)
+    
+    # ------------------ 新增处理逻辑：IF航段Name为空时填充RW** ------------------
+    def fill_rwy_name(group):
+        # 遍历分组中的每一行
+        for idx, row in group.iterrows():
+            # 检查条件：Leg为IF且Name为空且Rwy有效
+            if (row['Leg'] == 'IF' and 
+                pd.isnull(row['Name']) and 
+                pd.notnull(row['Rwy'])):
+                
+                # 转换Rwy为两位数格式
+                try:
+                    rwy_str = f"{int(float(row['Rwy'])):02d}"
+                except:
+                    rwy_str = str(row['Rwy']).zfill(2)
+                
+                # 更新Name字段
+                group.at[idx, 'Name'] = f"RW{rwy_str}"
+        
+        return group
+    
+    # 按关键字段分组处理
+    merged_data = merged_data.groupby(
+        ['ICAO', 'Terminal', 'Rwy'], 
+        group_keys=False
+    ).apply(fill_rwy_name)
+    
+    #整理重排序
+    merged_data = merged_data.sort_values(by=['ICAO', 'Terminal', 'Rwy'], kind='mergesort')
+    # 重置索引
+    merged_data.reset_index(drop=True, inplace=True)
+    
     return merged_data

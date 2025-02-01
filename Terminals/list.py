@@ -47,7 +47,34 @@ def get_terminals(conn, start_terminal_id, end_terminal_id, navdata_path):
     # 确保输出目录存在
     os.makedirs(f'{navdata_path}Supplemental\\SID', exist_ok=True)
     os.makedirs(f'{navdata_path}\\Supplemental\\STAR', exist_ok=True)
+
+    # ------------------ 新增处理 Rwy 字段为空的逻辑 ------------------
+    mask = terminals['Rwy'].isna()
+    to_process = terminals[mask].copy()
+    others = terminals[~mask].copy()
     
+    processed_rows = []
+    
+    for idx, row in to_process.iterrows():
+        # 查找匹配的merged_data行：ICAO相同且Terminal等于该行的Name
+        condition = (merged_data['ICAO'] == row['ICAO']) & (merged_data['Terminal'] == row['Name'])
+        matched = merged_data[condition]
+        rwys = matched['Rwy'].unique().tolist()  # 提取Rwy列作为Rwy值
+        
+        if not rwys:
+            # 无匹配，保留原行
+            processed_rows.append(row)
+        else:
+            # 生成新行，每个Rwy对应一行
+            for rwy in rwys:
+                new_row = row.copy()
+                new_row['Rwy'] = rwy
+                processed_rows.append(new_row)
+    
+    # 合并处理后的数据
+    processed_df = pd.DataFrame(processed_rows)
+    terminals = pd.concat([others, processed_df], ignore_index=True)
+
     return terminals, merged_data
 
 # 函数：解析已存在文件并提取信息

@@ -45,6 +45,7 @@ def parse_files(file, root):
 def legs_generate(icao, procedures, details, data):
     results = []
     current_transition = None
+    current_via = None  # 新增变量用于跟踪当前的 via
     seqno = 0
     for index, row in data.iterrows():
         if row['ICAO'] == icao:
@@ -57,13 +58,12 @@ def legs_generate(icao, procedures, details, data):
             Procedure = f"{row['ICAO']}.{transition}.{via}"
             Name = f"{transition}.{via}"
             if Procedure in procedures.get(row['ICAO'], {}):
-                #print("{row['ICAO']} {Procedure}存在匹配程序")
                 if Name not in details.get(row['ICAO'], {}):
-                    #print("{row['ICAO']} {Procedure}的相关航段未写入")
-                    # 如果 Terminal 更新，重置 seqno
-                    if transition != current_transition:
+                    # 如果 Terminal 或 Rwy 更新，重置 seqno
+                    if transition != current_transition or via != current_via:
                         current_transition = transition
-                        seqno = 1
+                        current_via = via  # 更新当前的 via
+                        seqno = 0
                     else:
                         seqno += 1
                     # 创建格式化字符串，并忽略 NaN、None 或空格的列
