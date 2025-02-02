@@ -1,6 +1,7 @@
 import os
 import re
 import time
+import shutil
 import logging
 import sqlite3
 import warnings
@@ -111,6 +112,17 @@ def get_terminal_ids():
         else:
             print("请输入有效的数字，并用空格分隔！")
 
+def delete_data_navdatasupplemental(navdata_path):
+    # 从 navdata_path 返回上级目录
+    parent_dir = os.path.dirname(navdata_path)
+    target_folder = os.path.join(parent_dir, "navdataSupplemental")
+    
+    try:
+        if os.path.exists(target_folder):
+            shutil.rmtree(target_folder, ignore_errors=True)
+    except Exception:
+        pass
+
 def countdown_timer(seconds):
     while seconds:
         print(f"处理结束，程序将在 {seconds} 秒钟后关闭", end='', flush=True)
@@ -130,4 +142,6 @@ if __name__ == "__main__":
     enroute(conn, route_file, navdata_path, csv)
     logging.info("开始处理Terminals部分")
     terminals(conn, navdata_path, start_terminal_id, end_terminal_id)
+    # 删除 navdataSupplemental 文件夹
+    delete_data_navdatasupplemental(navdata_path)
     countdown_timer(10)
