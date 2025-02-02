@@ -1,7 +1,9 @@
 import os
 import re
+import pytz
 import time
 import shutil
+import datetime
 import warnings
 import pandas as pd
 import concurrent.futures
@@ -128,6 +130,41 @@ def terminals(conn, navdata_path, start_terminal_id, end_terminal_id):
                 futures.append(executor.submit(process_file, file, root, data))
         for future in concurrent.futures.as_completed(futures):
             future.result()
+    
+    # 生成FMC_Ident.txt
+    # 修订期数表（按生效日期升序排列）
+    revision_table = [
+        (2501, '2025-1-23'),
+        (2502, '2025-2-20'),
+        (2503, '2025-3-20'),
+        (2504, '2025-4-17'),
+        (2505, '2025-5-15'),
+        (2506, '2025-6-12'),
+        (2507, '2025-7-10'),
+        (2508, '2025-8-7'),
+        (2509, '2025-9-4'),
+        (2510, '2025-10-2'),
+        (2511, '2025-10-30'),
+        (2512, '2025-11-27'),
+        (2513, '2025-12-25'),
+    ]
+
+    # 使用pytz获取UTC+8时间
+    utc_8 = pytz.timezone('Asia/Shanghai')  # 确保使用UTC+8时区
+    current_date = datetime.datetime.now(utc_8).date()  # 直接获取北京时区日期
+
+    # 匹配逻辑
+    matched_rev_code = 2501  # 默认值（表格首项）
+    for rev_code, eff_date_str in revision_table:
+        eff_date = datetime.datetime.strptime(eff_date_str, "%Y-%m-%d").date()
+        if current_date >= eff_date:
+            matched_rev_code = rev_code
+            break  # 找到第一个当前日期>=生效日期的条目
+
+    # 写入文件
+    fmc_ident_path = os.path.join(supplemental_path_base, "FMC_Ident.txt")
+    with open(fmc_ident_path, 'w', encoding='utf-8') as f:
+        f.write(f"[Ident]\nSuppData=NAIP-{matched_rev_code}\n")
     
     end_time = time.time()
     run_time = end_time - start_time
