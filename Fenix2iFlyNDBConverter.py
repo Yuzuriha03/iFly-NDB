@@ -58,7 +58,7 @@ def get_db_connection(prompt):
 def get_route_file():
     paths_to_check = {
         "Microsoft Store版": os.path.expandvars(r'%LocalAppData%\Packages\Microsoft.FlightSimulator_8wekyb3d8bbwe\LocalCache\UserCfg.opt'),
-        "Steam版": os.path.expandvars(r'%AppData%\Microsoft Flight Simulator\UserCfg.opt')
+        "Steam版": os.path.expandvars(r'%AppData%\Roaming\Microsoft Flight Simulator\UserCfg.opt')
     }
     
     route_files = {}
