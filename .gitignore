@@ -1,0 +1,12 @@
+/.git
+/.vscode
+/__pycache__
+/Command.txt
+/Fenix2iFlyNDBConverter.exe
+/icon.ico
+/Fenix2iFlyNDBConverter.build
+/Fenix2iFlyNDBConverter.dist
+/Fenix2iFlyNDBConverter.onefile-build
+/Terminals/__pycache__
+/Enroute/__pycache__
+/Enroute/Route/__pycache__
