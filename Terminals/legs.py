@@ -158,8 +158,7 @@ def terminals(conn, navdata_path, start_terminal_id, end_terminal_id):
     for rev_code, eff_date_str in revision_table:
         eff_date = datetime.datetime.strptime(eff_date_str, "%Y-%m-%d").date()
         if current_date >= eff_date:
-            matched_rev_code = rev_code
-            break  # 找到第一个当前日期>=生效日期的条目
+            matched_rev_code = rev_code  # 确定修订期数
 
     # 写入文件
     fmc_ident_path = os.path.join(supplemental_path_base, "FMC_Ident.txt")
