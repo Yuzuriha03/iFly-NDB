@@ -5,8 +5,9 @@ import shutil
 import logging
 import sqlite3
 import warnings
+import ruterminals
 from Enroute.enroute import enroute
-from Terminals.legs import terminals
+#from Terminals.legs import terminals
 
 warnings.filterwarnings('ignore')
 
@@ -53,7 +54,7 @@ def get_db_connection(prompt):
                 conn.close()  # 关闭错误的数据库连接
                 continue
                         
-            return conn  # 返回有效的数据库连接对象
+            return conn, db_path  # 返回有效的数据库连接对象
 
 def get_route_file():
     paths_to_check = {
@@ -133,7 +134,7 @@ def countdown_timer(seconds):
 
 if __name__ == "__main__":
     # 连接到数据库
-    conn = get_db_connection("请输入Fenix的nd.db3文件路径：")
+    conn, db_path = get_db_connection("请输入Fenix的nd.db3文件路径：")
     csv = get_file_path("请输入NAIP RTE_SEG.csv文件路径：", "RTE_SEG.csv")
     route_file, navdata_path = get_route_file()
     # 获取起止 TerminalID
@@ -141,7 +142,7 @@ if __name__ == "__main__":
     logging.info("开始处理Enroute部分")
     enroute(conn, route_file, navdata_path, csv)
     logging.info("开始处理Terminals部分")
-    terminals(conn, navdata_path, start_terminal_id, end_terminal_id)
+    ruterminals.py_terminals(db_path, navdata_path, start_terminal_id, end_terminal_id)
     # 删除 navdataSupplemental 文件夹
     delete_data_navdatasupplemental(navdata_path)
     countdown_timer(10)

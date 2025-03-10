@@ -1,0 +1,27 @@
+[package]
+name = "ruterminals"
+version = "0.1.0"
+edition = "2021"
+description = "使用 Rust 重构航空数据转换相关功能，包括 legs、merged_data 和 list 模块"
+
+[lib]
+path = "src/legs.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.23.5", features = ["extension-module"] }
+# DataFrame 操作
+polars = { version = "0.46.0", features = ["lazy", "temporal"] }
+# SQLite 数据库访问
+rusqlite = {version = "0.33.0", features = ["bundled"] }
+# 正则表达式处理
+regex = "1"
+# 并行处理（用于文件遍历和并行调用）
+rayon = "1.6"
+# 时间处理
+chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10.1"
+# 文件目录遍历
+walkdir = "2"
+# 大地测距（使用 geographiclib 实现，与 Python 中 Geodesic.WGS84.Inverse 对应）
+geographiclib-rs = "0.2.4"
