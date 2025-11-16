@@ -1,34 +1,47 @@
 import os
 import time
 import datetime
-import requests
 import warnings
 from tqdm import tqdm
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from pygeomag import GeoMag
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 warnings.filterwarnings('ignore')
 
-def get_declination(lat, lon, date, key):
-    url = "https://www.ngdc.noaa.gov/geomag-web/calculators/calculateDeclination"
-    params = {
-        'lat1': lat,
-        'lon1': lon,
-        'key': key,
-        'resultFormat': 'json',
-        'startYear': date.year,
-        'startMonth': date.month,
-        'startDay': date.day
-    }
-    response = requests.get(url, params=params)
-    data = response.json()
-    return data['result'][0]['declination']
+geo_mag = GeoMag(coefficients_file='wmm/WMMHR_2025.COF', high_resolution=True)
+# 获取当前年份的小数表示（如2025.3表示2025年4月左右）
+current_date = datetime.datetime.now()
+year_decimal = current_date.year + ((current_date.month - 1) / 12.0) + (current_date.day / 365.0)
 
+def get_declination(lat, lon):
+    """
+    计算指定经纬度的磁偏角，使用本地pygeomag库而非API
+    
+    参数:
+    lat (float): 纬度
+    lon (float): 经度
+    COF_PATH (str): 磁场系数文件路径
+    
+    返回:
+    float: 磁偏角(度)，保留1位小数
+    """
+    try:
+        result = geo_mag.calculate(glat=float(lat), glon=float(lon), alt=0, time=year_decimal)
+        
+        # 取磁偏角结果(d属性)并四舍五入保留1位小数
+        declination = round(result.d, 1)
+        return declination
+        
+    except Exception as e:
+        print(f"计算磁偏角时出错: {e}")
+        return 0.0
+    
 def calculate_declination(entry):
-    api_key, current_date, rwy_latitude, rwy_longitude, true_heading = entry
+    rwy_latitude, rwy_longitude, true_heading = entry[:3]
     retries = 3
     while retries:
         try:
-            declination = get_declination(rwy_latitude, rwy_longitude, current_date, api_key)
+            declination = get_declination(rwy_latitude, rwy_longitude)
             magnetic_heading = round(true_heading - declination)
             return magnetic_heading
         except Exception as e:
@@ -36,9 +49,9 @@ def calculate_declination(entry):
             retries -= 1
     return round(true_heading)
 
-def generate_tasks(cursor, airport_rows, api_key, current_date):
+def generate_tasks(cursor, airport_rows):
     for airport_row in airport_rows:
-        airport_id, name, icao, latitude, longitude = airport_row
+        airport_id, name, icao = airport_row[:3]
         cursor.execute(
             "SELECT ID, Ident, TrueHeading, Length, Latitude, Longtitude, Elevation "
             "FROM runways WHERE AirportID = ?", (airport_id,)
@@ -64,12 +77,12 @@ def generate_tasks(cursor, airport_rows, api_key, current_date):
                     Frequency_str = "000.00"
             else:
                 Frequency_str = "000.00"
-            task = (api_key, current_date, rwy_latitude, rwy_longitude, true_heading)
+            task = (rwy_latitude, rwy_longitude, true_heading)
             yield (task, name, icao, ident, length, rwy_latitude_str, rwy_longitude_str, Frequency_str, rwy_elevation)
 
 def generate_result_strings(results):
     for result in results:
-        (api_key, current_date, rwy_latitude, rwy_longitude, true_heading), name, icao, ident, length, rwy_latitude_str, rwy_longitude_str, Frequency_str, rwy_elevation, magnetic_heading = result
+        task, name, icao, ident, length, rwy_latitude_str, rwy_longitude_str, Frequency_str, rwy_elevation, magnetic_heading = result
         result_str = f"{name:<24}{icao}{ident:<3}{round(length):05d}{magnetic_heading:03d}{rwy_latitude_str}{rwy_longitude_str}{Frequency_str}{magnetic_heading:03d}{round(rwy_elevation):05d}"
         yield result_str
 
@@ -77,9 +90,7 @@ def wpnavapt(conn, start_apt_id, navdata_path):
     if conn:
         cursor = conn.cursor()
         input_start_time = time.time()
-        api_key = input("请输入API密钥（密钥获取地址：https://ngdc.noaa.gov/geomag/CalcSurveyFin.shtml）：")
         input_time = time.time() - input_start_time
-        current_date = datetime.date.today()
         
         cursor.execute("SELECT ID FROM runways WHERE AirportID = ? LIMIT 1", (start_apt_id,))
         start_rwy_id_row = cursor.fetchone()
@@ -91,7 +102,7 @@ def wpnavapt(conn, start_apt_id, navdata_path):
             return
         
         cursor.execute(
-            "SELECT ID, Name, ICAO, Latitude, Longtitude FROM airports WHERE ID >= ?", 
+            "SELECT ID, Name, ICAO FROM airports WHERE ID >= ?", 
             (start_apt_id,)
         )
         airport_rows = cursor.fetchall()  # 确保是列表
@@ -100,11 +111,11 @@ def wpnavapt(conn, start_apt_id, navdata_path):
         total_airports = len(airport_rows)
         
         # 生成tasks
-        tasks = list(generate_tasks(cursor, airport_rows, api_key, current_date))
+        tasks = list(generate_tasks(cursor, airport_rows))
         
         results = []
         with tqdm(total=total_airports, desc="磁偏角计算进度", unit="个") as pbar:
-            with ThreadPoolExecutor(max_workers=50) as executor:
+            with ProcessPoolExecutor(max_workers=50) as executor:
                 future_to_task = {executor.submit(calculate_declination, task[0]): task for task in tasks}
                 for future in as_completed(future_to_task):
                     task = future_to_task[future]
