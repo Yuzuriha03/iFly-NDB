@@ -1,9 +1,16 @@
 import os
 import warnings
+from typing import cast
+
 import pandas as pd
 from geographiclib.geodesic import Geodesic
 
 warnings.filterwarnings('ignore')
+
+GEODESIC_MODEL: Geodesic = cast(
+    Geodesic,
+    getattr(Geodesic, "WGS84", Geodesic(a=6378137, f=1 / 298.257223563)),
+)
 
 def dms_to_decimal_latitude(dms):
     direction = dms[0]
@@ -35,8 +42,7 @@ def load_coordinate_from_table(conn, ident, table_name):
     return [{"Latitude": row[0], "Longitude": row[1]} for row in data]
 
 def geodesic_distance(lat1, lon1, lat2, lon2):
-    geod = Geodesic.WGS84
-    g = geod.Inverse(lat1, lon1, lat2, lon2)
+    g = GEODESIC_MODEL.Inverse(lat1, lon1, lat2, lon2)
     return g['s12'] / 1852
 
 def update_coordinates(conn, ident, latitude, longitude, point_type):

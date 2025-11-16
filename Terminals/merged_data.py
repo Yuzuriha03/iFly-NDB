@@ -1,10 +1,17 @@
 import re
 import math
 import warnings
+from typing import cast
+
 import pandas as pd
 from geographiclib.geodesic import Geodesic
 
 warnings.filterwarnings('ignore')
+
+GEODESIC_MODEL: Geodesic = cast(
+    Geodesic,
+    getattr(Geodesic, "WGS84", Geodesic(a=6378137, f=1 / 298.257223563)),
+)
 
 def generate_merged_data(conn, start_terminal_id, end_terminal_id):
 
@@ -15,23 +22,31 @@ def generate_merged_data(conn, start_terminal_id, end_terminal_id):
     OR ICAO LIKE 'ZL%' OR ICAO LIKE 'ZP%' OR ICAO LIKE 'ZS%' OR ICAO LIKE 'ZU%' OR ICAO LIKE 'ZW%' OR ICAO LIKE 'ZY%')
     """
     airports = pd.read_sql_query(airport_query, conn)
+    if airports.empty:
+        return pd.DataFrame()
+    airport_ids = airports['ID'].tolist()
     
     # 查询符合条件的 Runways
     runways = pd.read_sql_query(f"""
     SELECT ID, AirportID, Ident, TrueHeading, Latitude, Longtitude, Elevation 
     FROM Runways 
-    WHERE AirportID IN ({', '.join(map(str, airports['ID'].tolist()))})
+    WHERE AirportID IN ({', '.join(map(str, airport_ids))})
     """, conn)
     
     # 查询符合条件的 Terminals
     terminals = pd.read_sql_query(f"""
     SELECT ID, AirportID, Proc, ICAO, Name, Rwy 
     FROM Terminals 
-    WHERE ID BETWEEN ? AND ? AND AirportID IN ({', '.join(map(str, airports['ID'].tolist()))})
+    WHERE ID BETWEEN ? AND ? AND AirportID IN ({', '.join(map(str, airport_ids))})
     """, conn, params=(start_terminal_id, end_terminal_id))
+    if terminals.empty:
+        return pd.DataFrame()
     
     # 查询符合条件的 TerminalLegs
-    terminal_ids = ', '.join(map(str, terminals['ID'].tolist()))
+    terminal_ids_list = terminals['ID'].tolist()
+    if not terminal_ids_list:
+        return pd.DataFrame()
+    terminal_ids = ', '.join(map(str, terminal_ids_list))
     terminal_legs_query = f"""
     SELECT ID, TerminalID, Type, Transition, TrackCode, WptID, WptLat, WptLon, TurnDir, NavID, NavBear, NavDist, Course, Distance, Alt, Vnav, CenterID 
     FROM TerminalLegs 
@@ -103,70 +118,111 @@ def generate_merged_data(conn, start_terminal_id, end_terminal_id):
         'CrossThisPoint', 'Altitude', 'MAP', 'Slope', 'Speed', 
         'CenterLat', 'CenterLon'
     ]
-    merged_data = merged_data[final_columns]
+    merged_data = merged_data[final_columns].reset_index(drop=True)
 
-    # 确保'CrossThisPoint'列中的值被转换为字符串
     merged_data['CrossThisPoint'] = merged_data['CrossThisPoint'].astype(str)
+    merged_data.loc[merged_data['CrossThisPoint'] == '0', 'CrossThisPoint'] = None
 
-    for index, row in merged_data[merged_data['CrossThisPoint'] == '0' ].iterrows():
-        merged_data.at[index, 'CrossThisPoint'] = None
-    
-    # 遍历merged_data，对于Altitude=MAP的行进行操作
-    for index, row in merged_data[merged_data['Altitude'] == 'MAP'].iterrows():
-        # 赋值MAP列
-        merged_data.at[index, 'MAP'] = 1
-        # 补ID
-        wpt_lat = row['Latitude']
-        wpt_lon = row['Longitude']
-        # 提取对应列的ICAO列和Rwy值
+    def normalize_runway_value(raw_value):
+        if pd.isnull(raw_value):
+            return None
+        try:
+            return f"{int(float(raw_value)):02d}"
+        except (TypeError, ValueError):
+            digits = ''.join(filter(str.isdigit, str(raw_value)))
+            return digits.zfill(2) if digits else str(raw_value)
+
+    def build_runway_ident(terminal_value):
+        if isinstance(terminal_value, str) and len(terminal_value) >= 4:
+            ident = terminal_value[1:4].replace('-', '')
+            if ident:
+                return f"RW{ident}"
+        return "RWXX"
+
+    def to_float(value):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    map_indices = merged_data.index[merged_data['Altitude'] == 'MAP'].tolist()
+    for idx in map_indices:
+        row_index = int(idx)
+        row = merged_data.loc[row_index]
+        merged_data.at[row_index, 'MAP'] = 1
+
+        wpt_lat_raw = row['Latitude']
+        wpt_lon_raw = row['Longitude']
+        wpt_lat = to_float(wpt_lat_raw)
+        wpt_lon = to_float(wpt_lon_raw)
         icao_val = row['ICAO']
-        rwy_val = str(row['Rwy']).zfill(2)
-        # 用ICAO值去terminals字典中寻找对应的AirportID
-        airport_id = terminals.loc[terminals['ICAO'] == icao_val, 'AirportID'].values[0]
-        # runways中找到对应的行
+        rwy_val = normalize_runway_value(row['Rwy'])
+
+        terminal_matches = terminals[terminals['ICAO'] == icao_val]
+        if terminal_matches.empty or rwy_val is None:
+            continue
+
+        airport_id = int(terminal_matches['AirportID'].iloc[0])
         runway_row = runways[(runways['AirportID'] == airport_id) & (runways['Ident'] == rwy_val)]
-    
-        if pd.notnull(wpt_lat) and pd.notnull(wpt_lon):
+
+        has_waypoint_coords = wpt_lat is not None and wpt_lon is not None
+        if has_waypoint_coords:
             waypoint = waypoints[(waypoints['Latitude'] == wpt_lat) & (waypoints['Longtitude'] == wpt_lon)]
             if not waypoint.empty:
-                merged_data.at[index, 'Name'] = waypoint.iloc[0]['Ident']
-            else:
-                 # 在runways字典中找到对应行，并填入merged_data
-                 if not runway_row.empty:
-                     merged_data.at[index, 'Latitude'] = runway_row.iloc[0]['Latitude']
-                     merged_data.at[index, 'Longitude'] = runway_row.iloc[0]['Longtitude']
-                     new_ident = f"RW{row['Terminal'][1:4].replace('-', '')}"
-                     merged_data.at[index, 'Name'] = new_ident
+                merged_data.at[row_index, 'Name'] = waypoint.iloc[0]['Ident']
+            elif not runway_row.empty:
+                merged_data.at[row_index, 'Latitude'] = runway_row.iloc[0]['Latitude']
+                merged_data.at[row_index, 'Longitude'] = runway_row.iloc[0]['Longtitude']
+                merged_data.at[row_index, 'Name'] = build_runway_ident(row['Terminal'])
+        elif not runway_row.empty:
+            merged_data.at[row_index, 'Latitude'] = runway_row.iloc[0]['Latitude']
+            merged_data.at[row_index, 'Longitude'] = runway_row.iloc[0]['Longtitude']
+            merged_data.at[row_index, 'Name'] = build_runway_ident(row['Terminal'])
+
+        runway_elevation = to_float(runway_row.iloc[0]['Elevation']) if not runway_row.empty else None
+        slope_value = to_float(row['Slope'])
+        if runway_elevation is None or slope_value is None:
+            continue
+
+        previous_idx = row_index - 1
+        previous_altitude_str = None
+        while previous_idx >= 0:
+            candidate_altitude = merged_data.at[previous_idx, 'Altitude']
+            if candidate_altitude:
+                previous_altitude_str = candidate_altitude
+                break
+            previous_idx -= 1
+
+        if previous_altitude_str is None:
+            continue
+
+        previous_digits = ''.join(re.findall(r'\d+', str(previous_altitude_str)))
+        if not previous_digits:
+            continue
+        previous_altitude = float(previous_digits)
+        previous_latitude = to_float(merged_data.at[previous_idx, 'Latitude'])
+        previous_longitude = to_float(merged_data.at[previous_idx, 'Longitude'])
+        if previous_latitude is None or previous_longitude is None:
+            continue
+
+        current_lat = to_float(row['Latitude'])
+        current_lon = to_float(row['Longitude'])
+        if current_lat is None or current_lon is None:
+            continue
+
+        result = GEODESIC_MODEL.Inverse(
+            previous_latitude,
+            previous_longitude,
+            current_lat,
+            current_lon,
+        )
+        distance_ft = result['s12'] / 0.3048
+        altitude = previous_altitude - (distance_ft * math.tan(math.radians(slope_value)))
+        fallback_altitude = round(runway_elevation) + 50
+        if runway_elevation + 50 <= altitude < 16000:
+            merged_data.at[row_index, 'Altitude'] = round(altitude)
         else:
-            # 在runways字典中找到对应行，并填入merged_data
-            if not runway_row.empty:
-                merged_data.at[index, 'Latitude'] = runway_row.iloc[0]['Latitude']
-                merged_data.at[index, 'Longitude'] = runway_row.iloc[0]['Longtitude']
-                new_ident = f"RW{row['Terminal'][1:4].replace('-', '')}"
-                merged_data.at[index, 'Name'] = new_ident
-        
-        # 计算高度值
-        slope = row['Slope']
-        if not runway_row.empty:
-            runway_elevation = runway_row.iloc[0]['Elevation']
-        if pd.notnull(slope):
-            n = 1
-            previous_altitude_str = merged_data.at[index - n, 'Altitude']
-            while not previous_altitude_str and index - n >= 0:
-                n += 1
-                previous_altitude_str = merged_data.at[index - n, 'Altitude']
-            
-            if previous_altitude_str:
-                previous_altitude = float(''.join(re.findall(r'\d+', previous_altitude_str)))
-                previous_latitude = merged_data.at[index-n, 'Latitude']
-                previous_longitude = merged_data.at[index-n, 'Longitude']
-                if pd.notnull(previous_latitude) and pd.notnull(previous_longitude):
-                    distance = Geodesic.WGS84.Inverse(previous_latitude, previous_longitude, row['Latitude'], row['Longitude'])['s12'] / 0.3048  # 转换为英尺
-                    altitude = previous_altitude - (distance * math.tan(math.radians(slope)))
-                    if runway_elevation + 50 <= altitude < 16000:
-                        merged_data.at[index, 'Altitude'] = round(altitude)
-                    else:
-                        merged_data.at[index, 'Altitude'] = round(runway_elevation) + 50
+            merged_data.at[row_index, 'Altitude'] = fallback_altitude
 
     def update_names(df, replacements):
         for old_name, new_name in replacements.items():
@@ -241,10 +297,11 @@ def generate_merged_data(conn, start_terminal_id, end_terminal_id):
         return group
     
     # 按关键字段分组处理
-    merged_data = merged_data.groupby(
+    grouped = merged_data.groupby(
         ['ICAO', 'Terminal', 'Rwy'], 
         group_keys=False
     ).apply(fill_rwy_name)
+    merged_data = cast(pd.DataFrame, grouped)
     
     #整理重排序
     merged_data = merged_data.sort_values(by=['ICAO', 'Terminal', 'Rwy'], kind='mergesort')

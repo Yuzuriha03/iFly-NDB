@@ -69,9 +69,13 @@ def get_route_file():
                 for line in file:
                     if 'InstalledPackagesPath' in line:
                         match = re.search(r'"(.*?)"', line)
-                        route_file = match.group(1)
-                        route_file = os.path.join(route_file, 'Community\\ifly-aircraft-737max8\\Data\\navdata\\Permanent\\WPNAVRTE.txt')
-                        route_files[version] = route_file
+                        if match:
+                            route_file = match.group(1)
+                            route_file = os.path.join(
+                                route_file,
+                                'Community\\ifly-aircraft-737max8\\Data\\navdata\\Permanent\\WPNAVRTE.txt',
+                            )
+                            route_files[version] = route_file
                         break
     
     if route_files:

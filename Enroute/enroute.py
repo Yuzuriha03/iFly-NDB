@@ -17,6 +17,7 @@ def enroute(conn, route_file, navdata_path, csv):
     if conn:
         start_time = time.time()
         cursor = conn.cursor()
+        start_airport_id = None
         # 查找 ICAO = ZYYJ 的记录
         cursor.execute("SELECT ID FROM airports WHERE ICAO = 'ZYYJ'")
         start_id_row = cursor.fetchone()
@@ -27,10 +28,17 @@ def enroute(conn, route_file, navdata_path, csv):
             start_airport_id = start_id + 1
         else:
             print("未找到对应的机场。")
+            return
+        
+        if start_airport_id is None:
+            print("未能确定起始机场ID，终止执行。")
+            return
 
         airport(conn, start_airport_id, navdata_path)
         supp(conn, start_airport_id, navdata_path)
         input_time = wpnavapt(conn, start_airport_id, navdata_path)
+        if not isinstance(input_time, (int, float)):
+            input_time = 0.0
         wpnavaid(conn, navdata_path)
         wpnavfix(conn, navdata_path)
         file2 = wpnavrte(conn, csv, navdata_path)

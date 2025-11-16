@@ -112,9 +112,14 @@ def wpnavapt(conn, start_apt_id, navdata_path):
         
         # 生成tasks
         tasks = list(generate_tasks(cursor, airport_rows))
+        total_tasks = len(tasks)
         
+        if not total_tasks:
+            print("未找到需要处理的跑道数据")
+            return
+
         results = []
-        with tqdm(total=total_airports, desc="磁偏角计算进度", unit="个") as pbar:
+        with tqdm(total=total_tasks, desc="磁偏角计算进度", unit="条") as pbar:
             with ProcessPoolExecutor(max_workers=50) as executor:
                 future_to_task = {executor.submit(calculate_declination, task[0]): task for task in tasks}
                 for future in as_completed(future_to_task):
@@ -125,7 +130,9 @@ def wpnavapt(conn, start_apt_id, navdata_path):
                         pbar.update(1)
                     except Exception as e:
                         print(f"磁偏角计算错误: {e}")
-                        results.append(task + (task[0][4],))
+                        fallback_heading = round(task[0][2])
+                        results.append(task + (fallback_heading,))
+                        pbar.update(1)
         
         # 对结果按照 ICAO Rwy排序
         results.sort(key=lambda x: (x[2], x[3]))
