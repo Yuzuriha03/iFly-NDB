@@ -63,17 +63,34 @@ def generate_merged_data(conn, start_terminal_id, end_terminal_id):
     
     # 合并两个 DataFrame
     merged_data = terminal_legs.merge(terminal_legs_ex, on='ID', how='left')
-    
-    # 过滤掉 NavID 为空的值
+
+    # 过滤掉 NavID 为空的值，并且只保留数值型的 NavID
     terminal_legs_nav = terminal_legs.dropna(subset=['NavID'])
-    
+    # 过滤掉非数值型的 NavID (例如 'L', 'R' 等字符串)
+    terminal_legs_nav = terminal_legs_nav[pd.to_numeric(terminal_legs_nav['NavID'], errors='coerce').notna()]
+
     # 查询符合条件的 Waypoints 和 Navaids
     waypoints = pd.read_sql_query("SELECT ID, Ident, Latitude, Longtitude FROM Waypoints", conn)
-    navaids = pd.read_sql_query(f"""
-    SELECT ID, Ident, Latitude, Longtitude 
-    FROM Navaids 
-    WHERE ID IN ({', '.join(map(str, terminal_legs_nav['NavID'].tolist()))})
-    """, conn)
+
+    # 只在有有效 NavID 时才查询 Navaids
+    if not terminal_legs_nav.empty:
+        # 将 NavID 转换为整数列表，避免SQL注入和类型错误
+        try:
+            nav_ids = [int(float(x)) for x in terminal_legs_nav['NavID'].unique() if pd.notna(x)]
+            if nav_ids:
+                nav_ids_str = ', '.join(map(str, nav_ids))
+                navaids = pd.read_sql_query(f"""
+                SELECT ID, Ident, Latitude, Longtitude
+                FROM Navaids
+                WHERE ID IN ({nav_ids_str})
+                """, conn)
+            else:
+                navaids = pd.DataFrame(columns=['ID', 'Ident', 'Latitude', 'Longtitude'])
+        except (ValueError, TypeError) as e:
+            print(f"警告：NavID 转换错误: {e}，跳过 Navaids 查询")
+            navaids = pd.DataFrame(columns=['ID', 'Ident', 'Latitude', 'Longtitude'])
+    else:
+        navaids = pd.DataFrame(columns=['ID', 'Ident', 'Latitude', 'Longtitude'])
     
     # 处理 SpeedLimit
     merged_data['SpeedLimit'] = merged_data['SpeedLimit'].apply(lambda x: str(int(x)) if pd.notnull(x) else x)
