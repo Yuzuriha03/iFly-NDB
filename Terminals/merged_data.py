@@ -18,8 +18,8 @@ def generate_merged_data(conn, start_terminal_id, end_terminal_id):
     # 查询符合条件的 Airports
     airport_query = """
     SELECT ID, ICAO FROM Airports 
-    WHERE ICAO = 'VQPR' OR (ICAO LIKE 'ZB%' OR ICAO LIKE 'ZG%' OR ICAO LIKE 'ZH%' OR ICAO LIKE 'ZJ%' 
-    OR ICAO LIKE 'ZL%' OR ICAO LIKE 'ZP%' OR ICAO LIKE 'ZS%' OR ICAO LIKE 'ZU%' OR ICAO LIKE 'ZW%' OR ICAO LIKE 'ZY%')
+    WHERE ICAO IN ('VQPR', 'OPGT') 
+    OR SUBSTR(ICAO, 1, 2) IN ('ZB', 'ZG', 'ZH', 'ZJ', 'ZL', 'ZP', 'ZS', 'ZU', 'ZW', 'ZY')
     """
     airports = pd.read_sql_query(airport_query, conn)
     if airports.empty:
