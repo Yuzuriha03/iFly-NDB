@@ -1,10 +1,12 @@
 import os
 import re
+import sys
 import time
 import shutil
 import logging
 import sqlite3
 import warnings
+import subprocess
 from Enroute.enroute import enroute
 from Terminals.legs import terminals
 
@@ -57,8 +59,10 @@ def get_db_connection(prompt):
 
 def get_route_file():
     paths_to_check = {
-        "Microsoft Store版": os.path.expandvars(r'%LocalAppData%\Packages\Microsoft.FlightSimulator_8wekyb3d8bbwe\LocalCache\UserCfg.opt'),
-        "Steam版": os.path.expandvars(r'%AppData%\Roaming\Microsoft Flight Simulator\UserCfg.opt')
+        "MSFS2020 (Microsoft Store)": os.path.expandvars(r'%LocalAppData%\Packages\Microsoft.FlightSimulator_8wekyb3d8bbwe\LocalCache\UserCfg.opt'),
+        "MSFS2020 (Steam)": os.path.expandvars(r'%AppData%\Roaming\Microsoft Flight Simulator\UserCfg.opt'),
+        "MSFS2024 (Microsoft Store)": os.path.expandvars(r'%LocalAppData%\Packages\Microsoft.Limitless_8wekyb3d8bbwe\LocalCache\UserCfg.opt'),
+        "MSFS2024 (Steam)": os.path.expandvars(r'%AppData%\Roaming\Microsoft Flight Simulator 2024\UserCfg.opt')
     }
     
     route_files = {}
@@ -82,23 +86,28 @@ def get_route_file():
         available_files = {version: rf for version, rf in route_files.items() if os.path.exists(rf)}
         
         if len(available_files) > 1:
-            print("找到多个航路文件目录:")
+            print("找到多个航路文件目录，将自动处理所有目录:")
             for i, (version, rf) in enumerate(available_files.items(), 1):
                 print(f"{i}: {version} 目录 - {rf}")
-            choice = int(input("请选择使用的路径 (输入数字): ")) - 1
-            route_file = list(available_files.values())[choice]
+            
+            all_files = list(available_files.values())
+            
+            # 自动选择所有
+            route_file = all_files[0]
             navdata_path = os.path.dirname(os.path.dirname(route_file))
+            other_paths = []
+            for rf in all_files[1:]:
+                other_paths.append(os.path.dirname(os.path.dirname(rf)))
         else:
             route_file = list(available_files.values())[0]
             navdata_path = os.path.dirname(os.path.dirname(route_file))
-        
-        logging.info(f"程序已自动找到iFly航路文件目录: {route_file}")
-        return route_file, navdata_path
+            other_paths = []
+        return route_file, navdata_path, other_paths
     else:
         logging.warning("无法找到iFly航路文件目录，请手动指定路径：")
         route_file = get_file_path("(位于Community\\ifly-aircraft-737max8\\Data\\navdata\\Permanent\\WPNAVRTE.txt)：", "WPNAVRTE.txt")
         navdata_path = os.path.dirname(os.path.dirname(route_file))
-        return route_file, navdata_path
+        return route_file, navdata_path, []
 
 def get_terminal_ids():
     while True:
@@ -135,11 +144,58 @@ def countdown_timer(seconds):
         print('\r', end='', flush=True)
     os._exit(0)  # 强制退出程序
 
+def update_layout_json(navdata_path):
+    # navdata_path 类似于 .../Community/ifly-aircraft-737max8/Data/navdata
+    # 我们需要找到 .../Community/ifly-aircraft-737max8/layout.json
+    
+    # 向上回溯到 ifly-aircraft-737max8 目录
+    # navdata_path = .../Data/navdata
+    # os.path.dirname(navdata_path) = .../Data
+    # os.path.dirname(os.path.dirname(navdata_path)) = .../ifly-aircraft-737max8
+    
+    package_root = os.path.dirname(os.path.dirname(navdata_path))
+    layout_json_path = os.path.join(package_root, "layout.json")
+    
+    if not os.path.exists(layout_json_path):
+        logging.warning(f"未找到 layout.json 文件: {layout_json_path}")
+        return
+
+    # 假设 MSFSLayoutGenerator.exe 在当前脚本所在目录，或者在系统路径中
+    # 这里假设它在当前脚本同级目录下
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    
+    # 如果是打包后的 exe 运行，需要从临时目录获取
+    if hasattr(sys, 'frozen'):
+        # Nuitka 打包后的临时目录
+        current_dir = os.path.dirname(sys.executable)
+        # 或者尝试 sys._MEIPASS (PyInstaller) 或 Nuitka 的特定属性，但通常 sys.executable 的目录或者解压目录
+        # 对于 Nuitka --onefile，文件会被解压到临时目录，但 sys.executable 指向的是外面的 exe
+        # 实际上 Nuitka --onefile 会设置 sys.frozen = 1
+        # 并且会将数据文件解压到临时目录，可以通过 __file__ 获取（在 Nuitka 中 __file__ 指向解压后的脚本路径）
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+
+    generator_exe = os.path.join(current_dir, "MSFSLayoutGenerator.exe")
+    
+    if not os.path.exists(generator_exe):
+        logging.warning(f"未找到 MSFSLayoutGenerator.exe: {generator_exe}")
+        # 尝试直接调用命令，也许在环境变量中
+        generator_exe = "MSFSLayoutGenerator.exe"
+
+    logging.info(f"正在更新 layout.json: {layout_json_path}")
+    try:
+        # 将 layout.json 文件拖放到 MSFSLayoutGenerator.exe 上，通常意味着将文件路径作为参数传递
+        subprocess.run([generator_exe, layout_json_path], check=True)
+        logging.info("layout.json 更新成功")
+    except subprocess.CalledProcessError as e:
+        logging.error(f"更新 layout.json 失败: {e}")
+    except FileNotFoundError:
+        logging.error("无法执行 MSFSLayoutGenerator.exe，请确保它存在于程序目录或系统路径中。")
+
 if __name__ == "__main__":
     # 连接到数据库
     conn= get_db_connection("请输入Fenix的nd.db3文件路径：")
     csv = get_file_path("请输入NAIP RTE_SEG.csv文件路径：", "RTE_SEG.csv")
-    route_file, navdata_path = get_route_file()
+    route_file, navdata_path, other_paths = get_route_file()
     # 获取起止 TerminalID
     start_terminal_id, end_terminal_id = get_terminal_ids()
     logging.info("开始处理Enroute部分")
@@ -147,4 +203,16 @@ if __name__ == "__main__":
     logging.info("开始处理Terminals部分")
     terminals(conn, navdata_path, start_terminal_id, end_terminal_id)
     delete_data_navdatasupplemental(navdata_path)
+    update_layout_json(navdata_path)
+    
+    # 同步到其他目录
+    for target_path in other_paths:
+        try:
+            if os.path.exists(target_path):
+                shutil.rmtree(target_path)
+            shutil.copytree(navdata_path, target_path)
+            update_layout_json(target_path)
+        except Exception:
+            pass
+
     countdown_timer(10)
