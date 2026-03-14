@@ -5,9 +5,15 @@ mod layout;
 mod terminals;
 
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::thread;
+use std::thread::JoinHandle;
 
-use anyhow::Result;
+use anyhow::{anyhow, Context, Result};
 use clap::Parser;
+use rayon::prelude::*;
+use rayon::ThreadPoolBuilder;
+use rusqlite::Connection;
 
 #[derive(Debug, Parser)]
 #[command(author, version, about = "Convert Fenix navdata to iFly Supplemental format")]
@@ -38,51 +44,209 @@ fn main() {
 fn run() -> Result<()> {
     let cli = Cli::parse();
 
-    let db_path = cli.db_path.clone();
-    let mut conn = match db_path {
-        Some(path) => common::open_fenix_connection(&path)?,
-        None => loop {
-            let path = common::prompt_path("请输入Fenix的nd.db3文件路径：", ".db3")?;
-            match common::open_fenix_connection(&path) {
-                Ok(conn) => break conn,
-                Err(error) => eprintln!("{error}"),
-            }
-        },
-    };
+    let db_path = resolve_db_path(cli.db_path.clone())?;
+    let db_connection_task = spawn_db_connection_task(db_path.clone());
+    let navdata_detect_task = spawn_navdata_detect_task(cli.route_file.clone(), cli.navdata_path.clone());
 
     let csv_path = match cli.csv_path.clone() {
         Some(path) => path,
         None => common::prompt_path("请输入NAIP RTE_SEG.csv文件路径：", "RTE_SEG.csv")?,
     };
-
-    let (route_file, navdata_path, other_paths) = common::resolve_navdata_paths(cli.route_file, cli.navdata_path)?;
+    let enroute_prepare_task = spawn_enroute_prepare_task(db_path.clone(), csv_path.clone());
 
     let (start_terminal_id, end_terminal_id) = common::resolve_terminal_range(
         cli.start_terminal_id,
         cli.end_terminal_id,
     )?;
-
-    println!("开始处理Enroute部分");
-    enroute::run(&mut conn, &route_file, &navdata_path, &csv_path)?;
-
-    println!("开始处理Terminals部分");
-    terminals::run(
-        &conn,
-        &navdata_path,
+    let terminals_prepare_task = spawn_terminals_prepare_task(
+        db_path.clone(),
         start_terminal_id,
         end_terminal_id,
-    )?;
+    );
 
-    common::delete_data_navdatasupplemental(&navdata_path)?;
-    if !cli.skip_layout_update {
-        common::update_layout_json(&navdata_path)?;
+    let navdata_targets = resolve_navdata_targets(
+        cli.route_file,
+        cli.navdata_path,
+        navdata_detect_task,
+    )?;
+    let _validated_conn = join_worker(db_connection_task, "数据库连接与校验任务")??;
+    let prepared_enroute = join_worker(enroute_prepare_task, "Enroute 预加载任务")??.map(Arc::new);
+    let prepared_terminals = Arc::new(
+        join_worker(terminals_prepare_task, "Terminals 预加载任务")??,
+    );
+
+    common::announce_navdata_targets(&navdata_targets);
+
+    let multiple_targets = navdata_targets.len() > 1;
+    let thread_count = directory_worker_count(navdata_targets.len());
+    if multiple_targets {
+        println!("检测到 {} 个 navdata 目录", navdata_targets.len());
     }
 
-    for target_path in other_paths {
-        common::sync_navdata_to_other_path(&navdata_path, &target_path, !cli.skip_layout_update)?;
+    if thread_count <= 1 {
+        for target in navdata_targets {
+            process_navdata_target(
+                target,
+                prepared_enroute.as_deref(),
+                prepared_terminals.as_ref(),
+                cli.skip_layout_update,
+            )?;
+        }
+    } else {
+        let pool = ThreadPoolBuilder::new()
+            .num_threads(thread_count)
+            .build()
+            .context("无法创建目录级线程池")?;
+
+        let results = pool.install(|| {
+            navdata_targets
+                .into_par_iter()
+                .map(|target| {
+                    process_navdata_target(
+                        target,
+                        prepared_enroute.as_deref(),
+                        prepared_terminals.as_ref(),
+                        cli.skip_layout_update,
+                    )
+                })
+                .collect::<Vec<_>>()
+        });
+
+        for result in results {
+            result?;
+        }
     }
 
     common::countdown_timer(10);
 
     Ok(())
+}
+
+fn resolve_db_path(cli_db_path: Option<PathBuf>) -> Result<PathBuf> {
+    match cli_db_path {
+        Some(path) => Ok(path),
+        None => common::prompt_path("请输入Fenix的nd.db3文件路径：", ".db3"),
+    }
+}
+
+fn spawn_db_connection_task(db_path: PathBuf) -> JoinHandle<Result<Connection>> {
+    thread::spawn(move || common::open_fenix_connection(&db_path))
+}
+
+fn spawn_enroute_prepare_task(
+    db_path: PathBuf,
+    csv_path: PathBuf,
+) -> JoinHandle<Result<Option<enroute::PreparedEnrouteData>>> {
+    thread::spawn(move || {
+        let conn = common::open_fenix_connection(&db_path)
+            .with_context(|| format!("Enroute 预加载时无法连接数据库: {}", db_path.display()))?;
+        enroute::prepare(&conn, &csv_path)
+            .with_context(|| format!("Enroute 预加载失败: {}", csv_path.display()))
+    })
+}
+
+fn spawn_navdata_detect_task(
+    route_file: Option<PathBuf>,
+    navdata_path: Option<PathBuf>,
+) -> Option<JoinHandle<Result<Vec<common::NavdataTarget>>>> {
+    if route_file.is_some() || navdata_path.is_some() {
+        return None;
+    }
+
+    Some(thread::spawn(common::auto_detect_navdata_paths))
+}
+
+fn spawn_terminals_prepare_task(
+    db_path: PathBuf,
+    start_terminal_id: i64,
+    end_terminal_id: i64,
+) -> JoinHandle<Result<terminals::PreparedTerminalData>> {
+    thread::spawn(move || {
+        let conn = common::open_fenix_connection(&db_path)
+            .with_context(|| format!("Terminals 预加载时无法连接数据库: {}", db_path.display()))?;
+        terminals::prepare(&conn, start_terminal_id, end_terminal_id).with_context(|| {
+            format!(
+                "Terminals 预加载失败: TerminalID {}-{}",
+                start_terminal_id,
+                end_terminal_id
+            )
+        })
+    })
+}
+
+fn resolve_navdata_targets(
+    route_file: Option<PathBuf>,
+    navdata_path: Option<PathBuf>,
+    navdata_detect_task: Option<JoinHandle<Result<Vec<common::NavdataTarget>>>>,
+) -> Result<Vec<common::NavdataTarget>> {
+    if route_file.is_some() || navdata_path.is_some() {
+        return common::resolve_navdata_paths(route_file, navdata_path);
+    }
+
+    match navdata_detect_task {
+        Some(task) => match join_worker(task, "navdata 自动探测任务")? {
+            Ok(targets) => Ok(targets),
+            Err(error) => {
+                eprintln!("navdata 自动探测失败，将切换为手动输入: {error:#}");
+                common::resolve_navdata_paths(None, None)
+            }
+        },
+        None => common::resolve_navdata_paths(None, None),
+    }
+}
+
+fn join_worker<T>(handle: JoinHandle<Result<T>>, task_name: &str) -> Result<Result<T>> {
+    handle
+        .join()
+        .map_err(|payload| anyhow!("{task_name}发生线程 panic: {}", panic_payload_to_string(payload)))
+}
+
+fn panic_payload_to_string(payload: Box<dyn std::any::Any + Send + 'static>) -> String {
+    match payload.downcast::<String>() {
+        Ok(message) => *message,
+        Err(payload) => match payload.downcast::<&'static str>() {
+            Ok(message) => (*message).to_string(),
+            Err(_) => "unknown panic payload".to_string(),
+        },
+    }
+}
+
+fn process_navdata_target(
+    target: common::NavdataTarget,
+    prepared_enroute: Option<&enroute::PreparedEnrouteData>,
+    prepared_terminals: &terminals::PreparedTerminalData,
+    skip_layout_update: bool,
+) -> Result<()> {
+    let target_label = target_label(&target);
+
+    if let Some(prepared_enroute) = prepared_enroute {
+        enroute::write_prepared(prepared_enroute, &target.route_file, &target.navdata_path)
+            .with_context(|| format!("处理 Enroute 目录失败: {}", target.navdata_path.display()))?;
+        println!("[{target_label}] Enroute数据转换完毕");
+    }
+
+    terminals::write_prepared(prepared_terminals, &target.navdata_path)
+        .with_context(|| format!("处理 Terminals 目录失败: {}", target.navdata_path.display()))?;
+    println!("[{target_label}] Terminal数据转换完毕");
+
+    common::delete_data_navdatasupplemental(&target.navdata_path)?;
+    if !skip_layout_update {
+        common::update_layout_json(&target.navdata_path)?;
+    }
+    Ok(())
+}
+
+fn directory_worker_count(target_count: usize) -> usize {
+    if target_count <= 1 {
+        return 1;
+    }
+
+    let available = thread::available_parallelism()
+        .map(|parallelism| parallelism.get())
+        .unwrap_or(1);
+    available.min(target_count).clamp(1, 4)
+}
+
+fn target_label(target: &common::NavdataTarget) -> &str {
+    target.source_label.as_str()
 }

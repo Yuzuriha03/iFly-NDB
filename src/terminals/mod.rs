@@ -145,6 +145,7 @@ struct IndexedTerminalFileRows<'a> {
     ordered_rows: Vec<(usize, &'a MergedLeg)>,
 }
 
+#[allow(dead_code)]
 #[derive(Default)]
 struct SeedReuseBreakdown {
     missing_list_only: usize,
@@ -155,7 +156,9 @@ struct SeedReuseBreakdown {
 
 struct TerminalWriteResult {
     files: Vec<PendingTerminalFile>,
+    #[allow(dead_code)]
     seeded_existing_file_count: usize,
+    #[allow(dead_code)]
     seed_breakdown: SeedReuseBreakdown,
 }
 
@@ -179,12 +182,14 @@ enum PendingTerminalBuild {
     Pending(PendingTerminalFile),
 }
 
+#[allow(dead_code)]
 enum TerminalWriteAction {
     Skipped,
     Copied,
     Rewritten,
 }
 
+#[allow(dead_code)]
 struct TerminalWriteOutcome {
     action: TerminalWriteAction,
 }
@@ -194,65 +199,48 @@ enum CoordinateNameLookup<'a> {
     Multiple,
 }
 
-pub fn run(
+pub struct PreparedTerminalData {
+    merged_data: Vec<MergedLeg>,
+    list_rows: Vec<ListRow>,
+    revision: String,
+}
+
+pub fn prepare(
     conn: &Connection,
-    navdata_path: &Path,
     start_terminal_id: i64,
     end_terminal_id: i64,
-) -> Result<()> {
+) -> Result<PreparedTerminalData> {
+    let merged_data = generate_merged_data(conn, start_terminal_id, end_terminal_id)?;
+    let list_rows = build_terminal_list_rows(conn, &merged_data, start_terminal_id, end_terminal_id)?;
+    let revision = get_revision_code_from_config()?;
+    Ok(PreparedTerminalData {
+        merged_data,
+        list_rows,
+        revision,
+    })
+}
+
+pub fn write_prepared(prepared: &PreparedTerminalData, navdata_path: &Path) -> Result<()> {
     let permanent_path = navdata_path.join("Permanent");
     let supplemental_path = navdata_path.join("Supplemental");
 
-    let merged_data = generate_merged_data(conn, start_terminal_id, end_terminal_id)?;
-
-    let merged_rows_by_file = group_merged_rows_by_file(&merged_data);
+    let merged_rows_by_file = group_merged_rows_by_file(&prepared.merged_data);
 
     let write_result = write_terminal_lists(
-        conn,
-        &merged_data,
+        &prepared.list_rows,
         &merged_rows_by_file,
-        start_terminal_id,
-        end_terminal_id,
         &permanent_path,
         navdata_path,
     )?;
-    println!(
-        "[Terminals] 按需复用既有终端文件 {} 个",
-        write_result.seeded_existing_file_count
-    );
 
-    let target_file_count = write_result.files.len();
-    let mut copied_file_count = 0usize;
-    let mut rewritten_file_count = 0usize;
     for pending_file in write_result.files {
-        let outcome = write_terminal_file(pending_file, &merged_rows_by_file)?;
-        match outcome.action {
-            TerminalWriteAction::Skipped => {}
-            TerminalWriteAction::Copied => copied_file_count += 1,
-            TerminalWriteAction::Rewritten => rewritten_file_count += 1,
-        }
+        let _ = write_terminal_file(pending_file, &merged_rows_by_file)?;
     }
-    println!(
-        "[Terminals] 处理目标终端文件 {} 个，复制 {} 个，改写 {} 个",
-        target_file_count,
-        copied_file_count,
-        rewritten_file_count,
-    );
-    println!(
-        "[Terminals] Seed 文件拆分：仅缺 list {} 个，仅缺 detail {} 个，同时缺两者 {} 个，已完整 {} 个",
-        write_result.seed_breakdown.missing_list_only,
-        write_result.seed_breakdown.missing_detail_only,
-        write_result.seed_breakdown.missing_both,
-        write_result.seed_breakdown.complete,
-    );
 
-    let revision = get_revision_code_from_config()?;
     fs::write(
         supplemental_path.join("FMC_Ident.txt"),
-        format!("[Ident]\nSuppData=NAIP-{revision}\n"),
+        format!("[Ident]\nSuppData=NAIP-{}\n", prepared.revision),
     )?;
-
-    println!("终端数据转换完毕");
     Ok(())
 }
 
@@ -739,22 +727,18 @@ fn push_unique_nested_value(
 }
 
 fn write_terminal_lists(
-    conn: &Connection,
-    merged_rows: &[MergedLeg],
+    list_rows: &[ListRow],
     merged_rows_by_file: &HashMap<TerminalFileKey, IndexedTerminalFileRows<'_>>,
-    start_terminal_id: i64,
-    end_terminal_id: i64,
     permanent_path: &Path,
     navdata_path: &Path,
 ) -> Result<TerminalWriteResult> {
-    let list_rows = build_terminal_list_rows(conn, merged_rows, start_terminal_id, end_terminal_id)?;
     let supplemental_sid = navdata_path.join("Supplemental").join("SID");
     let supplemental_star = navdata_path.join("Supplemental").join("STAR");
     fs::create_dir_all(&supplemental_sid)?;
     fs::create_dir_all(&supplemental_star)?;
 
     let mut grouped: HashMap<(String, String), Vec<ListRow>> = HashMap::new();
-    for row in list_rows {
+    for row in list_rows.iter().cloned() {
         grouped.entry((row.icao.clone(), row.proc_code.clone())).or_default().push(row);
     }
 

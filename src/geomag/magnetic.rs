@@ -4,7 +4,8 @@ use std::sync::OnceLock;
 
 use anyhow::{Context, Result};
 use chrono::{Datelike, Local};
-use geomag_wmm::{initialise_magnetic_model, MagneticModel};
+
+use crate::geomag::geomag_wmm::{initialise_magnetic_model, MagneticModel};
 
 const WMM_HIGH_RESOLUTION: &str = include_str!("magcof/WMMHR.COF");
 

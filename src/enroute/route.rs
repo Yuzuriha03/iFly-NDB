@@ -43,6 +43,10 @@ struct GeneratedAirwaySegment {
     longitude: f64,
 }
 
+pub(crate) struct PreparedRouteData {
+    contents: String,
+}
+
 type CoordinateKey = (u64, u64);
 type ResolvedCoordinateCache = HashMap<String, HashMap<CoordinateKey, (f64, f64)>>;
 type CoordinateCandidates = HashMap<String, Vec<(f64, f64)>>;
@@ -56,11 +60,7 @@ struct CoordinateResolver {
     waypoint_resolved_cache: ResolvedCoordinateCache,
 }
 
-pub fn wpnavrte(
-    conn: &mut Connection,
-    csv_file_path: &Path,
-    navdata_path: &Path,
-) -> Result<PathBuf> {
+pub fn prepare_wpnavrte(conn: &Connection, csv_file_path: &Path) -> Result<PreparedRouteData> {
     let csv_segments = load_csv_segments(csv_file_path)?;
     if csv_segments.is_empty() {
         return Err(anyhow!("CSV 中没有可转换的航路段"));
@@ -128,14 +128,21 @@ pub fn wpnavrte(
 
     airway_segments.sort_by(|left, right| left.route_ident.cmp(&right.route_ident));
 
-    let output_folder = navdata_path.join("Supplemental");
-    fs::create_dir_all(&output_folder)?;
-    let output_file = output_folder.join("wpnavrte.txt");
     let mut output = String::with_capacity(airway_segments.len().saturating_mul(40));
     for segment in &airway_segments {
         write_generated_airway_segment(&mut output, segment);
     }
-    fs::write(&output_file, output)?;
+    Ok(PreparedRouteData { contents: output })
+}
+
+pub fn write_prepared_wpnavrte(
+    prepared: &PreparedRouteData,
+    navdata_path: &Path,
+) -> Result<PathBuf> {
+    let output_folder = navdata_path.join("Supplemental");
+    fs::create_dir_all(&output_folder)?;
+    let output_file = output_folder.join("wpnavrte.txt");
+    fs::write(&output_file, &prepared.contents)?;
     Ok(output_file)
 }
 
@@ -375,10 +382,6 @@ fn load_coordinate_candidates(
         return Ok(candidates);
     }
 
-    if table_name == "Waypoints" && !table_has_ident_index(conn, table_name)? {
-        return load_waypoint_candidates_by_scan(conn, idents);
-    }
-
     let ident_list = idents.iter().collect::<Vec<_>>();
 
     for chunk in ident_list.chunks(IDENT_QUERY_CHUNK_SIZE) {
@@ -401,51 +404,6 @@ fn load_coordinate_candidates(
             candidates.entry(ident).or_default().push((latitude, longitude));
         }
     }
-
-    Ok(candidates)
-}
-
-fn table_has_ident_index(conn: &Connection, table_name: &str) -> Result<bool> {
-    let pragma = format!("PRAGMA index_list('{table_name}')");
-    let mut stmt = conn.prepare(&pragma)?;
-    let index_names = stmt.query_map([], |row| row.get::<_, String>(1))?;
-
-    for index_name in index_names {
-        let index_name = index_name?;
-        let info = format!("PRAGMA index_info('{index_name}')");
-        let mut info_stmt = conn.prepare(&info)?;
-        let columns = info_stmt.query_map([], |row| row.get::<_, String>(2))?;
-        for column in columns {
-            if column?.eq_ignore_ascii_case("Ident") {
-                return Ok(true);
-            }
-        }
-    }
-
-    Ok(false)
-}
-
-fn load_waypoint_candidates_by_scan(
-    conn: &Connection,
-    idents: &HashSet<String>,
-) -> Result<CoordinateCandidates> {
-    let mut candidates = HashMap::with_capacity(idents.len());
-    for ident in idents {
-        candidates.insert(ident.clone(), Vec::new());
-    }
-
-    let query = "SELECT Ident, Latitude, Longtitude FROM Waypoints";
-
-    let mut stmt = conn.prepare(query)?;
-    let mut rows = stmt.query([])?;
-    while let Some(row) = rows.next()? {
-        let ident = row.get_ref(0)?.as_str()?;
-        let Some(values) = candidates.get_mut(ident) else {
-            continue;
-        };
-        values.push((row.get(1)?, row.get(2)?));
-    }
-    candidates.retain(|_, values| !values.is_empty());
 
     Ok(candidates)
 }

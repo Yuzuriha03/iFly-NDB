@@ -9,6 +9,13 @@ use std::time::Duration;
 use anyhow::{anyhow, bail, Context, Result};
 use rusqlite::{types::ValueRef, Connection, Row};
 
+#[derive(Debug, Clone)]
+pub struct NavdataTarget {
+    pub source_label: String,
+    pub route_file: PathBuf,
+    pub navdata_path: PathBuf,
+}
+
 const REQUIRED_TABLES: &[&str] = &[
     "AirportCommunication",
     "AirportLookup",
@@ -101,15 +108,23 @@ pub fn open_fenix_connection(path: &Path) -> Result<Connection> {
 pub fn resolve_navdata_paths(
     route_file: Option<PathBuf>,
     navdata_path: Option<PathBuf>,
-) -> Result<(PathBuf, PathBuf, Vec<PathBuf>)> {
+) -> Result<Vec<NavdataTarget>> {
     if let Some(route_file) = route_file {
         let navdata = navdata_path.unwrap_or_else(|| derive_navdata_path(&route_file));
-        return Ok((route_file, navdata, Vec::new()));
+        return Ok(vec![NavdataTarget {
+            source_label: "手动指定".to_string(),
+            route_file,
+            navdata_path: navdata,
+        }]);
     }
 
     if let Some(navdata) = navdata_path {
         let route = navdata.join("Permanent").join("WPNAVRTE.txt");
-        return Ok((route, navdata, Vec::new()));
+        return Ok(vec![NavdataTarget {
+            source_label: "手动指定".to_string(),
+            route_file: route,
+            navdata_path: navdata,
+        }]);
     }
 
     auto_detect_route_file().or_else(|_| {
@@ -119,8 +134,27 @@ pub fn resolve_navdata_paths(
             "WPNAVRTE.txt",
         )?;
         let navdata = derive_navdata_path(&route_file);
-        Ok((route_file, navdata, Vec::new()))
+        Ok(vec![NavdataTarget {
+            source_label: "手动指定".to_string(),
+            route_file,
+            navdata_path: navdata,
+        }])
     })
+}
+
+pub fn auto_detect_navdata_paths() -> Result<Vec<NavdataTarget>> {
+    auto_detect_route_file()
+}
+
+pub fn announce_navdata_targets(targets: &[NavdataTarget]) {
+    if targets.len() <= 1 {
+        return;
+    }
+
+    println!("找到多个航路文件目录，将自动处理所有目录:");
+    for (index, target) in targets.iter().enumerate() {
+        println!("{}: {} 目录 - {}", index + 1, target.source_label, target.route_file.display());
+    }
 }
 
 pub fn derive_navdata_path(route_file: &Path) -> PathBuf {
@@ -181,25 +215,6 @@ pub fn update_layout_json(navdata_path: &Path) -> Result<()> {
     }
 
     crate::layout::update_layout_json(&layout_json_path)?;
-    Ok(())
-}
-
-pub fn sync_navdata_to_other_path(source_navdata: &Path, target_navdata: &Path, update_layout: bool) -> Result<()> {
-    let sync_result: Result<()> = (|| {
-        if target_navdata.exists() {
-            fs::remove_dir_all(target_navdata)
-                .with_context(|| format!("无法清理目标目录: {}", target_navdata.display()))?;
-        }
-        copy_dir_recursive(source_navdata, target_navdata)?;
-        if update_layout {
-            update_layout_json(target_navdata)?;
-        }
-        Ok(())
-    })();
-
-    if let Err(error) = sync_result {
-        eprintln!("同步目录失败 {}: {error:#}", target_navdata.display());
-    }
     Ok(())
 }
 
@@ -267,7 +282,7 @@ fn value_ref_to_string(value: ValueRef<'_>) -> Option<String> {
     }
 }
 
-fn auto_detect_route_file() -> Result<(PathBuf, PathBuf, Vec<PathBuf>)> {
+fn auto_detect_route_file() -> Result<Vec<NavdataTarget>> {
     let paths_to_check = [
         (
             "MSFS2020 (Microsoft Store)",
@@ -323,38 +338,14 @@ fn auto_detect_route_file() -> Result<(PathBuf, PathBuf, Vec<PathBuf>)> {
         bail!("无法自动找到 iFly 航路文件目录");
     }
 
-    if available_files.len() > 1 {
-        println!("找到多个航路文件目录，将自动处理所有目录:");
-        for (index, (name, route_file)) in available_files.iter().enumerate() {
-            println!("{}: {} 目录 - {}", index + 1, name, route_file.display());
-        }
-    }
-
-    let route_file = available_files[0].1.clone();
-    let navdata_path = derive_navdata_path(&route_file);
-    let other_paths = available_files
-        .iter()
-        .skip(1)
-        .map(|(_, path)| derive_navdata_path(path))
-        .collect();
-    Ok((route_file, navdata_path, other_paths))
-}
-
-fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
-    fs::create_dir_all(dst).with_context(|| format!("无法创建目录: {}", dst.display()))?;
-    for entry in fs::read_dir(src).with_context(|| format!("无法读取目录: {}", src.display()))? {
-        let entry = entry?;
-        let src_path = entry.path();
-        let dst_path = dst.join(entry.file_name());
-        if src_path.is_dir() {
-            copy_dir_recursive(&src_path, &dst_path)?;
-        } else {
-            fs::copy(&src_path, &dst_path).with_context(|| {
-                format!("无法复制 {} -> {}", src_path.display(), dst_path.display())
-            })?;
-        }
-    }
-    Ok(())
+    Ok(available_files
+        .into_iter()
+        .map(|(source_label, route_file)| NavdataTarget {
+            source_label,
+            navdata_path: derive_navdata_path(&route_file),
+            route_file,
+        })
+        .collect())
 }
 
 fn expand_env(input: &str) -> PathBuf {

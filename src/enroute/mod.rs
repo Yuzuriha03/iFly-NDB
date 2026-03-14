@@ -35,31 +35,44 @@ struct NavaidRow {
     longitude: f64,
 }
 
-pub fn run(
-    conn: &mut Connection,
+pub struct PreparedEnrouteData {
+    airport_data: String,
+    supp_files: Vec<(String, String)>,
+    wpnavapt_data: Option<String>,
+    wpnavaid_data: Option<String>,
+    wpnavfix_data: Option<String>,
+    route_data: route::PreparedRouteData,
+}
+
+pub fn prepare(conn: &Connection, csv_path: &Path) -> Result<Option<PreparedEnrouteData>> {
+    let Some(start_airport_id) = start_airport_id(conn)? else {
+        return Ok(None);
+    };
+
+    Ok(Some(PreparedEnrouteData {
+        airport_data: build_airport_data(conn, start_airport_id)?,
+        supp_files: build_supp_files(conn, start_airport_id)?,
+        wpnavapt_data: build_wpnavapt_data(conn, start_airport_id)?,
+        wpnavaid_data: build_wpnavaid_data(conn)?,
+        wpnavfix_data: build_wpnavfix_data(conn)?,
+        route_data: route::prepare_wpnavrte(conn, csv_path)?,
+    }))
+}
+
+pub fn write_prepared(
+    prepared: &PreparedEnrouteData,
     route_file: &Path,
     navdata_path: &Path,
-    csv_path: &Path,
 ) -> Result<()> {
-    let Some(start_airport_id) = start_airport_id(conn)? else {
-        return Ok(());
-    };
-    airport(conn, start_airport_id, navdata_path)?;
+    write_airport_data(navdata_path, &prepared.airport_data)?;
+    write_supp_files(navdata_path, &prepared.supp_files)?;
+    write_optional_supplemental_file(navdata_path, "wpnavapt.txt", prepared.wpnavapt_data.as_deref())?;
+    write_optional_supplemental_file(navdata_path, "wpnavaid.txt", prepared.wpnavaid_data.as_deref())?;
+    write_optional_supplemental_file(navdata_path, "wpnavfix.txt", prepared.wpnavfix_data.as_deref())?;
 
-    supp(conn, start_airport_id, navdata_path)?;
-
-    wpnavapt(conn, start_airport_id, navdata_path)?;
-
-    wpnavaid(conn, navdata_path)?;
-
-    wpnavfix(conn, navdata_path)?;
-
-    let generated_route_file = route::wpnavrte(conn, csv_path, navdata_path)?;
-
+    let generated_route_file = route::write_prepared_wpnavrte(&prepared.route_data, navdata_path)?;
     let checked_routes = route::check_route(route_file, &generated_route_file)?;
-
     route::insert_and_order_route(route_file, &generated_route_file, checked_routes)?;
-    println!("Enroute数据转换完毕");
     Ok(())
 }
 
@@ -80,7 +93,7 @@ fn start_airport_id(conn: &Connection) -> Result<Option<i64>> {
     }
 }
 
-fn airport(conn: &Connection, start_id: i64, navdata_path: &Path) -> Result<()> {
+fn build_airport_data(conn: &Connection, start_id: i64) -> Result<String> {
     let mut stmt = conn.prepare(
         "SELECT ICAO, Latitude, Longtitude FROM airports WHERE ID >= ? ORDER BY Latitude ASC",
     )?;
@@ -91,23 +104,22 @@ fn airport(conn: &Connection, start_id: i64, navdata_path: &Path) -> Result<()> 
         Ok((latitude, format!("{icao}{latitude:>10.6}{longitude:>11.6}")))
     })?;
 
-    let output_folder = navdata_path.join("Supplemental");
-    fs::create_dir_all(&output_folder)?;
-    let output_file = output_folder.join("airports.dat");
-
     let mut lines = Vec::new();
     for row in rows {
         lines.push(row?.1);
     }
-    fs::write(&output_file, lines.join("\n") + "\n")?;
-    println!("airport.dat已保存到{}", output_file.display());
+    Ok(lines.join("\n") + "\n")
+}
+
+fn write_airport_data(navdata_path: &Path, contents: &str) -> Result<()> {
+    let output_folder = navdata_path.join("Supplemental");
+    fs::create_dir_all(&output_folder)?;
+    let output_file = output_folder.join("airports.dat");
+    fs::write(&output_file, contents)?;
     Ok(())
 }
 
-fn supp(conn: &Connection, start_airport_id: i64, navdata_path: &Path) -> Result<()> {
-    let output_folder = navdata_path.join("Supplemental").join("Supp");
-    fs::create_dir_all(&output_folder)?;
-
+fn build_supp_files(conn: &Connection, start_airport_id: i64) -> Result<Vec<(String, String)>> {
     let mut stmt = conn.prepare(
         "SELECT ICAO, TransitionAltitude, TransitionLevel, SpeedLimit FROM airports WHERE ID >= ?",
     )?;
@@ -120,6 +132,7 @@ fn supp(conn: &Connection, start_airport_id: i64, navdata_path: &Path) -> Result
         ))
     })?;
 
+    let mut files = Vec::new();
     for row in rows {
         let (icao, transition_altitude, transition_level, speed_limit) = row?;
         let file_contents = [
@@ -131,14 +144,22 @@ fn supp(conn: &Connection, start_airport_id: i64, navdata_path: &Path) -> Result
             "[Transition_Level]".to_string(),
             format!("Altitude={transition_level}"),
         ];
-        fs::write(output_folder.join(format!("{icao}.supp")), file_contents.join("\n"))?;
+        files.push((format!("{icao}.supp"), file_contents.join("\n")));
     }
 
-    println!("supp文件已保存到 {}", output_folder.display());
+    Ok(files)
+}
+
+fn write_supp_files(navdata_path: &Path, supp_files: &[(String, String)]) -> Result<()> {
+    let output_folder = navdata_path.join("Supplemental").join("Supp");
+    fs::create_dir_all(&output_folder)?;
+    for (file_name, contents) in supp_files {
+        fs::write(output_folder.join(file_name), contents)?;
+    }
     Ok(())
 }
 
-fn wpnavapt(conn: &Connection, start_airport_id: i64, navdata_path: &Path) -> Result<()> {
+fn build_wpnavapt_data(conn: &Connection, start_airport_id: i64) -> Result<Option<String>> {
     let ils_frequency_cache = load_ils_frequency_cache(conn)?;
     let mut stmt = conn.prepare(
         "SELECT a.Name, a.ICAO, r.ID, r.Ident, r.TrueHeading, r.Length, r.Latitude, r.Longtitude, r.Elevation \
@@ -182,7 +203,7 @@ fn wpnavapt(conn: &Connection, start_airport_id: i64, navdata_path: &Path) -> Re
 
     if tasks.is_empty() {
         println!("未找到需要处理的跑道数据");
-        return Ok(());
+        return Ok(None);
     }
 
     tasks.sort_by(|left, right| left.icao.cmp(&right.icao).then(left.ident.cmp(&right.ident)));
@@ -191,17 +212,11 @@ fn wpnavapt(conn: &Connection, start_airport_id: i64, navdata_path: &Path) -> Re
         &tasks.iter().map(|task| (task.latitude, task.longitude)).collect::<Vec<_>>(),
     )?;
 
-    let output_folder = navdata_path.join("Supplemental");
-    fs::create_dir_all(&output_folder)?;
-    let output_file = output_folder.join("wpnavapt.txt");
     let mut body = String::with_capacity(tasks.len().saturating_mul(72));
-    for (task, declination) in tasks.into_iter().zip(declinations) {
-        append_wpnavapt_row(&mut body, &task, declination);
+    for (task, declination) in tasks.iter().zip(declinations) {
+        append_wpnavapt_row(&mut body, task, declination);
     }
-    fs::write(&output_file, body)?;
-
-    println!("已保存到 {}", output_file.display());
-    Ok(())
+    Ok(Some(body))
 }
 
 fn append_wpnavapt_row(buffer: &mut String, task: &RunwayTask, declination: f64) {
@@ -252,7 +267,7 @@ fn format_ils_frequency(freq: i64) -> String {
     format!("{frequency:.2}")
 }
 
-fn wpnavaid(conn: &Connection, navdata_path: &Path) -> Result<()> {
+fn build_wpnavaid_data(conn: &Connection) -> Result<Option<String>> {
     let start_id: i64 = match conn.query_row(
         "SELECT ID FROM navaids WHERE Name = 'DEXIN YANJI'",
         [],
@@ -261,7 +276,7 @@ fn wpnavaid(conn: &Connection, navdata_path: &Path) -> Result<()> {
         Ok(start_id) => start_id,
         Err(rusqlite::Error::QueryReturnedNoRows) => {
             println!("未找到对应的导航台。");
-            return Ok(());
+            return Ok(None);
         }
         Err(error) => return Err(error).context("查询导航台起始记录失败"),
     };
@@ -281,19 +296,14 @@ fn wpnavaid(conn: &Connection, navdata_path: &Path) -> Result<()> {
         })
     })?;
 
-    let output_folder = navdata_path.join("Supplemental");
-    fs::create_dir_all(&output_folder)?;
-    let output_file = output_folder.join("wpnavaid.txt");
     let mut body = String::new();
     for row in rows {
         append_navaid_row(&mut body, &row?);
     }
-    fs::write(&output_file, body)?;
-    println!("wpnavaid.txt已保存到 {}", output_file.display());
-    Ok(())
+    Ok(Some(body))
 }
 
-fn wpnavfix(conn: &Connection, navdata_path: &Path) -> Result<()> {
+fn build_wpnavfix_data(conn: &Connection) -> Result<Option<String>> {
     let second_id: i64 = match conn.query_row(
         "SELECT ID FROM waypoints WHERE Ident = '89E80' ORDER BY ID LIMIT 1 OFFSET 1",
         [],
@@ -302,7 +312,7 @@ fn wpnavfix(conn: &Connection, navdata_path: &Path) -> Result<()> {
         Ok(id) => id,
         Err(rusqlite::Error::QueryReturnedNoRows) => {
             println!("没有足够的记录");
-            return Ok(());
+            return Ok(None);
         }
         Err(error) => return Err(error).context("查询 wpnavfix 起始记录失败"),
     };
@@ -320,16 +330,26 @@ fn wpnavfix(conn: &Connection, navdata_path: &Path) -> Result<()> {
         Ok((ident, latitude, longitude))
     })?;
 
-    let output_folder = navdata_path.join("Supplemental");
-    fs::create_dir_all(&output_folder)?;
-    let output_file = output_folder.join("wpnavfix.txt");
     let mut body = String::new();
     for row in rows {
         let (ident, latitude, longitude) = row?;
         let _ = writeln!(body, "{:<24}{:<5}{:>10.6}{:>11.6}", ident, ident, latitude, longitude);
     }
-    fs::write(&output_file, body)?;
-    println!("wpnavfix已保存到 {}", output_file.display());
+    Ok(Some(body))
+}
+
+fn write_optional_supplemental_file(
+    navdata_path: &Path,
+    file_name: &str,
+    contents: Option<&str>,
+) -> Result<()> {
+    let Some(contents) = contents else {
+        return Ok(());
+    };
+    let output_folder = navdata_path.join("Supplemental");
+    fs::create_dir_all(&output_folder)?;
+    let output_file = output_folder.join(file_name);
+    fs::write(&output_file, contents)?;
     Ok(())
 }
 
