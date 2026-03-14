@@ -1,19 +1,21 @@
 use std::collections::{HashMap, HashSet};
+use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use geographiclib_rs::{Geodesic, InverseGeodesic};
-use regex::Regex;
 use rusqlite::{params, Connection, OptionalExtension};
-use walkdir::WalkDir;
 
 use crate::common::{opt_string_from_f64, row_opt_f64, row_opt_i64, row_opt_string, row_string, trimmed_float};
+
+type SharedText = Arc<str>;
 
 #[derive(Clone, Debug)]
 struct Airport {
     id: i64,
-    icao: String,
+    icao: SharedText,
 }
 
 #[derive(Clone, Debug)]
@@ -29,9 +31,9 @@ struct Runway {
 struct TerminalDef {
     id: i64,
     airport_id: i64,
-    icao: String,
-    name: String,
-    rwy: Option<String>,
+    proc_code: String,
+    name: SharedText,
+    rwy: Option<SharedText>,
 }
 
 #[derive(Clone, Debug)]
@@ -78,9 +80,10 @@ struct Navaid {
 #[derive(Clone, Debug)]
 struct MergedLeg {
     airport_id: i64,
-    icao: String,
-    rwy: Option<String>,
-    terminal: String,
+    icao: SharedText,
+    proc_code: String,
+    rwy: Option<SharedText>,
+    terminal: SharedText,
     type_code: String,
     transition: String,
     leg: Option<String>,
@@ -110,28 +113,138 @@ struct ListRow {
     rwy: Option<String>,
 }
 
+#[derive(Clone)]
+struct ProcedureListEntry {
+    name: String,
+    rwy: String,
+    seq: usize,
+}
+
 #[derive(Default)]
 struct ExistingProcedureList {
-    entries: Vec<(String, usize)>,
-    map: HashMap<String, usize>,
+    entries: Vec<ProcedureListEntry>,
+    map: HashMap<(String, String), usize>,
+    procedures: HashMap<String, HashSet<String>>,
     next_seq: usize,
 }
 
-pub fn run(conn: &Connection, navdata_path: &Path, start_terminal_id: i64, end_terminal_id: i64) -> Result<()> {
-    let started = std::time::Instant::now();
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct TerminalFileKey {
+    icao: String,
+    proc_code: String,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct TerminalSectionKey {
+    transition: String,
+    via: String,
+}
+
+struct IndexedTerminalFileRows<'a> {
+    section_keys: Vec<TerminalSectionKey>,
+    ordered_rows: Vec<(usize, &'a MergedLeg)>,
+}
+
+#[derive(Default)]
+struct SeedReuseBreakdown {
+    missing_list_only: usize,
+    missing_detail_only: usize,
+    missing_both: usize,
+    complete: usize,
+}
+
+struct TerminalWriteResult {
+    files: Vec<PendingTerminalFile>,
+    seeded_existing_file_count: usize,
+    seed_breakdown: SeedReuseBreakdown,
+}
+
+struct PendingTerminalFile {
+    file_key: TerminalFileKey,
+    path: PathBuf,
+    base_contents: String,
+    copy_source: Option<PathBuf>,
+    seeded_from_existing: bool,
+    missing_list_count: usize,
+    missing_detail_sections: Vec<usize>,
+    must_write: bool,
+}
+
+enum PendingTerminalBuild {
+    Skip {
+        seeded_from_existing: bool,
+        missing_list: bool,
+        missing_detail: bool,
+    },
+    Pending(PendingTerminalFile),
+}
+
+enum TerminalWriteAction {
+    Skipped,
+    Copied,
+    Rewritten,
+}
+
+struct TerminalWriteOutcome {
+    action: TerminalWriteAction,
+}
+
+enum CoordinateNameLookup<'a> {
+    Single(&'a str),
+    Multiple,
+}
+
+pub fn run(
+    conn: &Connection,
+    navdata_path: &Path,
+    start_terminal_id: i64,
+    end_terminal_id: i64,
+) -> Result<()> {
     let permanent_path = navdata_path.join("Permanent");
     let supplemental_path = navdata_path.join("Supplemental");
 
-    copy_existing_terminal_files(&permanent_path, &supplemental_path)?;
-
     let merged_data = generate_merged_data(conn, start_terminal_id, end_terminal_id)?;
-    write_terminal_lists(conn, &merged_data, start_terminal_id, end_terminal_id, navdata_path)?;
 
-    for entry in WalkDir::new(&supplemental_path).into_iter().filter_map(Result::ok) {
-        if entry.file_type().is_file() {
-            process_terminal_file(entry.path(), &merged_data)?;
+    let merged_rows_by_file = group_merged_rows_by_file(&merged_data);
+
+    let write_result = write_terminal_lists(
+        conn,
+        &merged_data,
+        &merged_rows_by_file,
+        start_terminal_id,
+        end_terminal_id,
+        &permanent_path,
+        navdata_path,
+    )?;
+    println!(
+        "[Terminals] 按需复用既有终端文件 {} 个",
+        write_result.seeded_existing_file_count
+    );
+
+    let target_file_count = write_result.files.len();
+    let mut copied_file_count = 0usize;
+    let mut rewritten_file_count = 0usize;
+    for pending_file in write_result.files {
+        let outcome = write_terminal_file(pending_file, &merged_rows_by_file)?;
+        match outcome.action {
+            TerminalWriteAction::Skipped => {}
+            TerminalWriteAction::Copied => copied_file_count += 1,
+            TerminalWriteAction::Rewritten => rewritten_file_count += 1,
         }
     }
+    println!(
+        "[Terminals] 处理目标终端文件 {} 个，复制 {} 个，改写 {} 个",
+        target_file_count,
+        copied_file_count,
+        rewritten_file_count,
+    );
+    println!(
+        "[Terminals] Seed 文件拆分：仅缺 list {} 个，仅缺 detail {} 个，同时缺两者 {} 个，已完整 {} 个",
+        write_result.seed_breakdown.missing_list_only,
+        write_result.seed_breakdown.missing_detail_only,
+        write_result.seed_breakdown.missing_both,
+        write_result.seed_breakdown.complete,
+    );
 
     let revision = get_revision_code_from_config()?;
     fs::write(
@@ -139,47 +252,35 @@ pub fn run(conn: &Connection, navdata_path: &Path, start_terminal_id: i64, end_t
         format!("[Ident]\nSuppData=NAIP-{revision}\n"),
     )?;
 
-    println!("终端数据转换完毕，用时：{:.3}秒", started.elapsed().as_secs_f64());
+    println!("终端数据转换完毕");
     Ok(())
 }
 
-fn copy_existing_terminal_files(permanent_path: &Path, supplemental_path: &Path) -> Result<()> {
-    let allowed_prefixes = ["OPGT", "VHHX", "ZB", "ZG", "ZH", "ZJ", "ZL", "ZP", "ZS", "ZU", "ZW", "ZY"];
-    let allowed_extensions = ["sid", "sidtrs", "app", "apptrs", "star", "startrs"];
-
-    for entry in WalkDir::new(permanent_path).into_iter().filter_map(Result::ok) {
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        let file_name = entry.file_name().to_string_lossy();
-        let extension = entry.path().extension().and_then(|ext| ext.to_str()).unwrap_or_default();
-        if !allowed_extensions.contains(&extension) {
-            continue;
-        }
-        if !allowed_prefixes.iter().any(|prefix| file_name.starts_with(prefix)) {
-            continue;
-        }
-
-        let relative = entry
-            .path()
-            .strip_prefix(permanent_path)
-            .with_context(|| format!("无法计算相对路径: {}", entry.path().display()))?;
-        let destination = supplemental_path.join(relative);
-        if destination.exists() {
-            continue;
-        }
-        if let Some(parent) = destination.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::copy(entry.path(), &destination).with_context(|| {
-            format!("无法复制 {} -> {}", entry.path().display(), destination.display())
-        })?;
+fn group_merged_rows_by_file<'a>(merged_rows: &'a [MergedLeg]) -> HashMap<TerminalFileKey, IndexedTerminalFileRows<'a>> {
+    let mut grouped: HashMap<TerminalFileKey, IndexedTerminalFileRows<'a>> = HashMap::new();
+    for row in merged_rows {
+        let file_key = merged_leg_file_key(row);
+        let section_key = merged_leg_section_key(row);
+        let indexed = grouped.entry(file_key).or_insert_with(|| IndexedTerminalFileRows {
+            section_keys: Vec::new(),
+            ordered_rows: Vec::new(),
+        });
+        let section_index = if let Some(section_index) = indexed.section_keys.iter().position(|candidate| candidate == &section_key) {
+            section_index
+        } else {
+            indexed.section_keys.push(section_key);
+            indexed.section_keys.len() - 1
+        };
+        indexed.ordered_rows.push((section_index, row));
     }
-
-    Ok(())
+    grouped
 }
 
-fn generate_merged_data(conn: &Connection, start_terminal_id: i64, end_terminal_id: i64) -> Result<Vec<MergedLeg>> {
+fn generate_merged_data(
+    conn: &Connection,
+    start_terminal_id: i64,
+    end_terminal_id: i64,
+) -> Result<Vec<MergedLeg>> {
     let airports = load_airports(conn)?;
     if airports.is_empty() {
         return Ok(Vec::new());
@@ -188,6 +289,7 @@ fn generate_merged_data(conn: &Connection, start_terminal_id: i64, end_terminal_
     let airport_by_id: HashMap<i64, Airport> = airports.into_iter().map(|airport| (airport.id, airport)).collect();
 
     let runways = load_runways(conn, &airport_ids)?;
+
     let terminals = load_terminals(conn, &airport_ids, start_terminal_id, end_terminal_id)?;
     if terminals.is_empty() {
         return Ok(Vec::new());
@@ -197,76 +299,85 @@ fn generate_merged_data(conn: &Connection, start_terminal_id: i64, end_terminal_
 
     let terminal_legs = load_terminal_legs(conn, &terminal_ids)?;
     let terminal_leg_ids: Vec<i64> = terminal_legs.iter().map(|leg| leg.id).collect();
+
     let terminal_legs_ex = load_terminal_legs_ex(conn, &terminal_leg_ids)?;
     let terminal_leg_ex_by_id: HashMap<i64, TerminalLegExRow> = terminal_legs_ex.into_iter().map(|row| (row.id, row)).collect();
 
     let nav_ids: Vec<i64> = terminal_legs.iter().filter_map(|leg| leg.nav_id).collect();
+
     let waypoints = load_all_waypoints(conn)?;
+
     let navaids = load_navaids(conn, &nav_ids)?;
-    let waypoint_by_id: HashMap<i64, Waypoint> = waypoints.clone().into_iter().collect();
     let navaid_by_id: HashMap<i64, Navaid> = navaids.into_iter().collect();
     let runways_by_airport_and_ident: HashMap<(i64, String), Runway> = runways
         .into_iter()
         .map(|runway| ((runway.airport_id, runway.ident.clone()), runway))
         .collect();
 
-    let mut merged_rows = Vec::new();
+    let mut merged_rows = Vec::with_capacity(terminal_legs.len());
     for leg in terminal_legs {
-        let Some(terminal) = terminal_by_id.get(&leg.terminal_id) else {
+        let TerminalLegRow {
+            id,
+            terminal_id,
+            type_code,
+            transition,
+            track_code,
+            wpt_id,
+            wpt_lat,
+            wpt_lon,
+            turn_dir,
+            nav_id,
+            nav_bear,
+            nav_dist,
+            course,
+            distance,
+            alt,
+            vnav,
+            center_id,
+        } = leg;
+
+        let Some(terminal) = terminal_by_id.get(&terminal_id) else {
             continue;
         };
         let Some(airport) = airport_by_id.get(&terminal.airport_id) else {
             continue;
         };
-        let ex = terminal_leg_ex_by_id.get(&leg.id);
-        let waypoint = leg.wpt_id.and_then(|id| waypoint_by_id.get(&id));
-        let navaid = leg.nav_id.and_then(|id| navaid_by_id.get(&id));
-        let center = leg.center_id.and_then(|id| waypoint_by_id.get(&id));
-
-        let speed = match (
-            ex.and_then(|value| value.speed_limit.clone()),
-            ex.and_then(|value| value.speed_limit_description.clone()),
-        ) {
-            (Some(limit), Some(description)) => Some(format!("{limit}{description}")),
-            (Some(limit), None) => Some(limit),
-            (None, Some(description)) => Some(description),
-            (None, None) => None,
-        };
-
-        let cross_this_point = match ex.and_then(|value| value.is_fly_over) {
-            Some(0) => None,
-            Some(value) => Some(format!("{:.1}", value as f64)),
-            None => Some("nan".to_string()),
-        };
+        let ex = terminal_leg_ex_by_id.get(&id);
+        let waypoint = wpt_id.and_then(|id| waypoints.get(&id));
+        let navaid = nav_id.and_then(|id| navaid_by_id.get(&id));
+        let center = center_id.and_then(|id| waypoints.get(&id));
+        let speed = build_speed_limit(ex);
+        let cross_this_point = build_cross_this_point(ex);
 
         merged_rows.push(MergedLeg {
             airport_id: airport.id,
             icao: airport.icao.clone(),
+            proc_code: terminal.proc_code.clone(),
             rwy: terminal.rwy.clone(),
             terminal: terminal.name.clone(),
-            type_code: leg.type_code.clone(),
-            transition: leg.transition.clone(),
-            leg: leg.track_code.clone(),
-            turn_direction: leg.turn_dir.clone(),
+            type_code,
+            transition,
+            leg: track_code,
+            turn_direction: turn_dir,
             name: waypoint.map(|value| value.ident.clone()),
-            latitude: leg.wpt_lat,
-            longitude: leg.wpt_lon,
+            latitude: wpt_lat,
+            longitude: wpt_lon,
             frequency: navaid.map(|value| value.ident.clone()),
-            nav_bear: leg.nav_bear.clone(),
-            nav_dist: leg.nav_dist.clone(),
-            heading: leg.course.clone(),
-            dist: leg.distance.clone(),
+            nav_bear,
+            nav_dist,
+            heading: course,
+            dist: distance,
             cross_this_point,
-            altitude: leg.alt.clone(),
+            altitude: alt,
             map: None,
-            slope: leg.vnav,
+            slope: vnav,
             speed,
             center_lat: center.map(|value| value.latitude),
             center_lon: center.map(|value| value.longitude),
         });
     }
+    apply_map_logic(&mut merged_rows, &waypoints, &runways_by_airport_and_ident)?;
 
-    apply_map_logic(&mut merged_rows, &terminals, &waypoints, &runways_by_airport_and_ident)?;
     apply_terminal_post_processing(&mut merged_rows);
     Ok(merged_rows)
 }
@@ -278,7 +389,7 @@ fn load_airports(conn: &Connection) -> Result<Vec<Airport>> {
     let rows = stmt.query_map([], |row| {
         Ok(Airport {
             id: row.get(0)?,
-            icao: row.get(1)?,
+            icao: row.get::<_, String>(1)?.into(),
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -309,13 +420,14 @@ fn load_terminals(conn: &Connection, airport_ids: &[i64], start_terminal_id: i64
     );
     let mut stmt = conn.prepare(&query)?;
     let rows = stmt.query_map(params![start_terminal_id, end_terminal_id], |row| {
-        let _proc_code = row_string(row, 2)?;
+        let proc_code = row_string(row, 2)?;
+        let _icao = row_string(row, 3)?;
         Ok(TerminalDef {
             id: row.get(0)?,
             airport_id: row.get(1)?,
-            icao: row_string(row, 3)?,
-            name: row_string(row, 4)?,
-            rwy: row_opt_string(row, 5)?,
+            proc_code,
+            name: row_string(row, 4)?.into(),
+            rwy: row_opt_string(row, 5)?.map(Into::into),
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -400,61 +512,49 @@ fn load_navaids(conn: &Connection, nav_ids: &[i64]) -> Result<HashMap<i64, Navai
 
 fn apply_map_logic(
     merged_rows: &mut [MergedLeg],
-    terminals: &[TerminalDef],
     waypoints: &HashMap<i64, Waypoint>,
     runways_by_airport_and_ident: &HashMap<(i64, String), Runway>,
 ) -> Result<()> {
     let geodesic = Geodesic::wgs84();
-    let waypoint_by_coordinates: HashMap<(u64, u64), String> = waypoints
-        .values()
-        .map(|waypoint| ((waypoint.latitude.to_bits(), waypoint.longitude.to_bits()), waypoint.ident.clone()))
-        .collect();
-    let terminals_by_icao: HashMap<&str, Vec<&TerminalDef>> = {
-        let mut map: HashMap<&str, Vec<&TerminalDef>> = HashMap::new();
-        for terminal in terminals {
-            map.entry(terminal.icao.as_str()).or_default().push(terminal);
+    let waypoint_by_coordinates = build_waypoint_coordinate_lookup(waypoints);
+    for index in 0..merged_rows.len() {
+        if merged_rows[index].altitude.as_deref() != Some("MAP") {
+            continue;
         }
-        map
-    };
 
-    let map_indices: Vec<usize> = merged_rows
-        .iter()
-        .enumerate()
-        .filter_map(|(index, row)| (row.altitude.as_deref() == Some("MAP")).then_some(index))
-        .collect();
-
-    for index in map_indices {
-        let previous_altitude_index = (0..index)
-            .rev()
-            .find(|candidate| {
-                merged_rows[*candidate]
-                    .altitude
-                    .as_deref()
-                    .is_some_and(|value| !value.is_empty())
-            });
-
-        let previous_altitude_text = previous_altitude_index.and_then(|previous_index| {
-            merged_rows[previous_index].altitude.clone()
-        });
-        let previous_coordinates = previous_altitude_index.and_then(|previous_index| {
-            match (merged_rows[previous_index].latitude, merged_rows[previous_index].longitude) {
-                (Some(latitude), Some(longitude)) => Some((latitude, longitude)),
-                _ => None,
+        let previous_context = merged_rows[..index].iter().rev().find_map(|row| {
+            let altitude = row.altitude.as_deref()?;
+            if altitude.is_empty() {
+                return None;
             }
+            Some((
+                parse_altitude_value(altitude),
+                row.latitude.zip(row.longitude),
+            ))
         });
-
         let row = &mut merged_rows[index];
         row.map = Some(1);
 
-        let rwy = row.rwy.clone().map(|value| normalize_runway_value(Some(value)));
-        let runway_key = rwy.clone().map(|ident| (row.airport_id, ident));
-        let runway = runway_key
+        let runway_ident = row.rwy.as_deref().map(|value| normalize_runway_value(Some(value)));
+        let runway = runway_ident
+            .as_ref()
+            .map(|ident| (row.airport_id, ident.clone()))
             .as_ref()
             .and_then(|key| runways_by_airport_and_ident.get(key));
 
         if let (Some(latitude), Some(longitude)) = (row.latitude, row.longitude) {
-            if let Some(name) = waypoint_by_coordinates.get(&(latitude.to_bits(), longitude.to_bits())) {
-                row.name = Some(name.clone());
+            if let Some(name_lookup) = waypoint_by_coordinates.get(&(latitude.to_bits(), longitude.to_bits())) {
+                match name_lookup {
+                    CoordinateNameLookup::Single(name) => row.name = Some((*name).to_string()),
+                    CoordinateNameLookup::Multiple if row.name.is_none() => {
+                        if let Some(runway) = runway {
+                            row.latitude = Some(runway.latitude);
+                            row.longitude = Some(runway.longitude);
+                            row.name = Some(build_runway_ident(&row.terminal));
+                        }
+                    }
+                    CoordinateNameLookup::Multiple => {}
+                }
             } else if let Some(runway) = runway {
                 row.latitude = Some(runway.latitude);
                 row.longitude = Some(runway.longitude);
@@ -468,18 +568,7 @@ fn apply_map_logic(
 
         let runway_elevation = runway.and_then(|value| value.elevation);
         let slope_value = row.slope;
-        let Some(_previous_index) = previous_altitude_index else {
-            continue;
-        };
-        let Some(previous_altitude_text) = previous_altitude_text else {
-            continue;
-        };
-        let previous_altitude_digits: String = previous_altitude_text.chars().filter(|c| c.is_ascii_digit()).collect();
-        if previous_altitude_digits.is_empty() {
-            continue;
-        }
-        let previous_altitude: f64 = previous_altitude_digits.parse()?;
-        let Some((previous_lat, previous_lon)) = previous_coordinates else {
+        let Some((Some(previous_altitude), Some((previous_lat, previous_lon)))) = previous_context else {
             continue;
         };
         let (Some(current_lat), Some(current_lon)) = (row.latitude, row.longitude) else {
@@ -499,8 +588,6 @@ fn apply_map_logic(
             fallback
         };
         row.altitude = Some(chosen_altitude.round().to_string());
-
-        let _ = terminals_by_icao.get(row.icao.as_str());
     }
 
     for row in merged_rows.iter_mut() {
@@ -520,10 +607,44 @@ fn apply_map_logic(
     Ok(())
 }
 
+fn build_waypoint_coordinate_lookup(
+    waypoints: &HashMap<i64, Waypoint>,
+) -> HashMap<(u64, u64), CoordinateNameLookup<'_>> {
+    let mut grouped = HashMap::new();
+    for waypoint in waypoints.values() {
+        let key = (waypoint.latitude.to_bits(), waypoint.longitude.to_bits());
+        match grouped.entry(key) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(CoordinateNameLookup::Single(waypoint.ident.as_str()));
+            }
+            std::collections::hash_map::Entry::Occupied(mut entry) => match entry.get() {
+                CoordinateNameLookup::Single(existing) if *existing == waypoint.ident.as_str() => {}
+                CoordinateNameLookup::Single(_) => {
+                    entry.insert(CoordinateNameLookup::Multiple);
+                }
+                CoordinateNameLookup::Multiple => {}
+            },
+        }
+    }
+    grouped
+}
+
+fn parse_altitude_value(value: &str) -> Option<f64> {
+    let mut parsed = 0f64;
+    let mut has_digit = false;
+    for digit in value.bytes().filter(u8::is_ascii_digit) {
+        parsed = parsed * 10.0 + f64::from(digit - b'0');
+        has_digit = true;
+    }
+    has_digit.then_some(parsed)
+}
+
 fn apply_terminal_post_processing(merged_rows: &mut Vec<MergedLeg>) {
+    let runway_transitions = build_transition_runway_lookup(merged_rows);
+
     for row in merged_rows.iter_mut() {
         if row.rwy.is_none() && row.transition.starts_with("RW") {
-            row.rwy = Some(row.transition[2..].to_string());
+            row.rwy = Some(row.transition[2..].to_string().into());
             row.type_code = "5".to_string();
         }
     }
@@ -537,32 +658,20 @@ fn apply_terminal_post_processing(merged_rows: &mut Vec<MergedLeg>) {
 
     let mut expanded_rows: Vec<MergedLeg> = merged_rows
         .iter()
-        .cloned()
         .filter(|row| !(row.transition == "ALL" && row.rwy.is_none()))
+        .cloned()
         .collect();
 
-    for (index, row) in rows_to_process {
-        let mut transitions = Vec::new();
-        for (candidate_index, candidate) in merged_rows.iter().enumerate() {
-            if candidate_index == index {
-                continue;
-            }
-            if candidate.icao == row.icao
-                && candidate.terminal == row.terminal
-                && !candidate.transition.is_empty()
-                && !transitions.contains(&candidate.transition)
-            {
-                transitions.push(candidate.transition.clone());
-            }
-        }
-
-        for rwy in transitions
-            .into_iter()
-            .filter(|transition| transition.starts_with("RW"))
-            .map(|transition| transition[2..].to_string())
-        {
+    for (_, row) in rows_to_process {
+        let Some(runways) = runway_transitions
+            .get(row.icao.as_ref())
+            .and_then(|terminals| terminals.get(row.terminal.as_ref()))
+        else {
+            continue;
+        };
+        for rwy in runways {
             let mut cloned = row.clone();
-            cloned.rwy = Some(rwy);
+            cloned.rwy = Some(rwy.clone().into());
             cloned.type_code = "5".to_string();
             expanded_rows.push(cloned);
         }
@@ -571,27 +680,73 @@ fn apply_terminal_post_processing(merged_rows: &mut Vec<MergedLeg>) {
     for row in expanded_rows.iter_mut() {
         if row.leg.as_deref() == Some("IF") && row.name.is_none() {
             if let Some(rwy) = row.rwy.as_ref() {
-                row.name = Some(format!("RW{}", normalize_runway_value(Some(rwy.clone()))));
+                row.name = Some(format!("RW{}", normalize_runway_value(Some(rwy.as_ref()))));
             }
         }
     }
 
     expanded_rows.sort_by(|left, right| {
         left.icao
-            .cmp(&right.icao)
-            .then(left.terminal.cmp(&right.terminal))
+            .as_ref()
+            .cmp(right.icao.as_ref())
+            .then(left.terminal.as_ref().cmp(right.terminal.as_ref()))
             .then(left.rwy.cmp(&right.rwy))
     });
     *merged_rows = expanded_rows;
 }
 
+fn build_transition_runway_lookup(merged_rows: &[MergedLeg]) -> HashMap<String, HashMap<String, Vec<String>>> {
+    let mut grouped = HashMap::new();
+    for row in merged_rows {
+        if !row.transition.starts_with("RW") {
+            continue;
+        }
+        push_unique_nested_value(
+            &mut grouped,
+            row.icao.as_ref(),
+            row.terminal.as_ref(),
+            row.transition[2..].to_string(),
+        );
+    }
+    grouped
+}
+
+fn build_terminal_runway_lookup(merged_rows: &[MergedLeg]) -> HashMap<String, HashMap<String, Vec<String>>> {
+    let mut grouped = HashMap::new();
+    for row in merged_rows {
+        let Some(rwy) = row.rwy.as_ref() else {
+            continue;
+        };
+        push_unique_nested_value(&mut grouped, row.icao.as_ref(), row.terminal.as_ref(), rwy.to_string());
+    }
+    grouped
+}
+
+fn push_unique_nested_value(
+    grouped: &mut HashMap<String, HashMap<String, Vec<String>>>,
+    left: &str,
+    right: &str,
+    value: String,
+) {
+    let values = grouped
+        .entry(left.to_string())
+        .or_default()
+        .entry(right.to_string())
+        .or_default();
+    if !values.iter().any(|existing| existing == &value) {
+        values.push(value);
+    }
+}
+
 fn write_terminal_lists(
     conn: &Connection,
     merged_rows: &[MergedLeg],
+    merged_rows_by_file: &HashMap<TerminalFileKey, IndexedTerminalFileRows<'_>>,
     start_terminal_id: i64,
     end_terminal_id: i64,
+    permanent_path: &Path,
     navdata_path: &Path,
-) -> Result<()> {
+) -> Result<TerminalWriteResult> {
     let list_rows = build_terminal_list_rows(conn, merged_rows, start_terminal_id, end_terminal_id)?;
     let supplemental_sid = navdata_path.join("Supplemental").join("SID");
     let supplemental_star = navdata_path.join("Supplemental").join("STAR");
@@ -603,11 +758,47 @@ fn write_terminal_lists(
         grouped.entry((row.icao.clone(), row.proc_code.clone())).or_default().push(row);
     }
 
+    let mut files = Vec::new();
+    let mut copied_existing_file_count = 0usize;
+    let mut seed_breakdown = SeedReuseBreakdown::default();
     for ((icao, proc_code), rows) in grouped {
-        write_list_file(&icao, &proc_code, &rows, navdata_path)?;
+        match write_list_file(
+            &icao,
+            &proc_code,
+            &rows,
+            merged_rows_by_file,
+            permanent_path,
+            navdata_path,
+            &mut copied_existing_file_count,
+        )? {
+            PendingTerminalBuild::Skip {
+                seeded_from_existing,
+                missing_list,
+                missing_detail,
+            } => {
+                if seeded_from_existing {
+                    record_seed_breakdown(&mut seed_breakdown, missing_list, missing_detail);
+                }
+            }
+            PendingTerminalBuild::Pending(file_state) => {
+                if file_state.seeded_from_existing {
+                    record_seed_breakdown(
+                        &mut seed_breakdown,
+                        file_state.missing_list_count > 0,
+                        !file_state.missing_detail_sections.is_empty(),
+                    );
+                }
+                files.push(file_state);
+            }
+        }
     }
 
-    Ok(())
+    files.sort_by(|left, right| left.path.cmp(&right.path));
+    Ok(TerminalWriteResult {
+        files,
+        seeded_existing_file_count: copied_existing_file_count,
+        seed_breakdown,
+    })
 }
 
 fn build_terminal_list_rows(
@@ -616,14 +807,15 @@ fn build_terminal_list_rows(
     start_terminal_id: i64,
     end_terminal_id: i64,
 ) -> Result<Vec<ListRow>> {
+    let runway_lookup = build_terminal_runway_lookup(merged_rows);
     let mut rows = Vec::new();
     for row in merged_rows {
         if matches!(row.type_code.as_str(), "6" | "A") {
             rows.push(ListRow {
                 proc_code: row.type_code.clone(),
-                icao: row.icao.clone(),
+                icao: row.icao.to_string(),
                 name: row.transition.clone(),
-                rwy: Some(row.terminal.clone()),
+                rwy: Some(row.terminal.to_string()),
             });
         }
     }
@@ -650,233 +842,506 @@ fn build_terminal_list_rows(
             processed.push(row);
             continue;
         }
-        let mut rwys = Vec::new();
-        for merged in merged_rows
-            .iter()
-            .filter(|merged| merged.icao == row.icao && merged.terminal == row.name)
-        {
-            if let Some(rwy) = merged.rwy.clone() {
-                if !rwys.contains(&rwy) {
-                    rwys.push(rwy);
-                }
-            }
-        }
+        let Some(rwys) = runway_lookup
+            .get(row.icao.as_str())
+            .and_then(|names| names.get(row.name.as_str()))
+        else {
+            processed.push(row);
+            continue;
+        };
         if rwys.is_empty() {
             processed.push(row);
-        } else {
-            for rwy in rwys {
-                let mut cloned = row.clone();
-                cloned.rwy = Some(rwy);
-                processed.push(cloned);
-            }
+            continue;
+        }
+        let ListRow {
+            proc_code,
+            icao,
+            name,
+            rwy: _,
+        } = row;
+        for rwy in rwys {
+            processed.push(ListRow {
+                proc_code: proc_code.clone(),
+                icao: icao.clone(),
+                name: name.clone(),
+                rwy: Some(rwy.clone()),
+            });
         }
     }
 
     Ok(processed)
 }
 
-fn write_list_file(icao: &str, proc_code: &str, rows: &[ListRow], navdata_path: &Path) -> Result<()> {
-    let file_name = match proc_code {
-        "2" => navdata_path.join("Supplemental").join("SID").join(format!("{icao}.sid")),
-        "1" => navdata_path.join("Supplemental").join("STAR").join(format!("{icao}.star")),
-        "3" => navdata_path.join("Supplemental").join("STAR").join(format!("{icao}.app")),
-        "6" => navdata_path.join("Supplemental").join("SID").join(format!("{icao}.sidtrs")),
-        "A" => navdata_path.join("Supplemental").join("STAR").join(format!("{icao}.apptrs")),
-        _ => return Ok(()),
+fn write_list_file(
+    icao: &str,
+    proc_code: &str,
+    rows: &[ListRow],
+    merged_rows_by_file: &HashMap<TerminalFileKey, IndexedTerminalFileRows<'_>>,
+    permanent_path: &Path,
+    navdata_path: &Path,
+    seeded_existing_file_count: &mut usize,
+) -> Result<PendingTerminalBuild> {
+    let Some(file_name) = terminal_output_path(icao, proc_code, navdata_path) else {
+        return Ok(PendingTerminalBuild::Skip {
+            seeded_from_existing: false,
+            missing_list: false,
+            missing_detail: false,
+        });
     };
-
-    if let Some(parent) = file_name.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    if !file_name.exists() {
-        fs::write(&file_name, "")?;
-    }
-
-    let mut existing = parse_existing_file(&file_name)?;
+    let supplemental_root = navdata_path.join("Supplemental");
+    let output_exists = file_name.exists();
+    let seed_file = load_seed_terminal_file_contents(
+        permanent_path,
+        &supplemental_root,
+        &file_name,
+        seeded_existing_file_count,
+    )?;
+    let file_key = TerminalFileKey {
+        icao: icao.to_string(),
+        proc_code: proc_code.to_string(),
+    };
+    let mut parsed_seed = parse_terminal_file_contents(&file_name, &seed_file.contents);
+    let mut missing_list_count = 0usize;
     for row in rows {
-        let name_rwy = format!("{}.{}", row.name, zfill_runway_value(row.rwy.clone()));
-        if existing.map.contains_key(&name_rwy) {
+        let runway = zfill_runway_value(row.rwy.as_deref());
+        if parsed_seed.existing.map.contains_key(&(row.name.clone(), runway.clone())) {
             continue;
         }
-        let seq = existing.next_seq;
-        existing.next_seq += 1;
-        existing.map.insert(name_rwy.clone(), seq);
-        existing.entries.push((name_rwy, seq));
+        missing_list_count += 1;
+        let seq = parsed_seed.existing.next_seq;
+        parsed_seed.existing.next_seq += 1;
+        parsed_seed.existing.entries.push(ProcedureListEntry {
+            name: row.name.clone(),
+            rwy: runway.clone(),
+            seq,
+        });
+        parsed_seed
+            .existing
+            .map
+            .insert((row.name.clone(), runway.clone()), seq);
+        insert_procedure_lookup(&mut parsed_seed.existing.procedures, &row.name, &runway);
     }
 
-    let mut lines = fs::read_to_string(&file_name)?.lines().map(|line| format!("{line}\n")).collect::<Vec<_>>();
-    let second_bracket = lines.iter().enumerate().skip(1).find_map(|(index, line)| line.starts_with('[').then_some(index));
-    if let Some(index) = second_bracket {
-        lines = lines[index..].to_vec();
-    }
-    lines.insert(0, "[list]\n".to_string());
+    let missing_detail_sections = collect_missing_detail_sections(
+        &parsed_seed.existing.procedures,
+        &parsed_seed.details,
+        merged_rows_by_file.get(&file_key),
+    );
 
-    let new_lines = existing
-        .entries
-        .iter()
-        .map(|(name_rwy, seq)| {
-            let mut parts = name_rwy.split('.');
-            let name = parts.next().unwrap_or_default();
-            let rwy = parts.next().unwrap_or_default();
-            format!("Procedure.{seq}={name}.{rwy}\n")
-        })
-        .collect::<Vec<_>>();
+    let base_contents = if missing_list_count > 0 {
+        build_list_file_contents(&seed_file.contents, &parsed_seed.existing.entries)
+    } else {
+        seed_file.contents
+    };
 
-    lines.splice(1..1, new_lines);
-    if let Some(last) = lines.last_mut() {
-        *last = last.trim_end_matches('\n').to_string();
-    }
-    fs::write(&file_name, lines.concat())?;
-    Ok(())
-}
+    let seeded_from_existing = seed_file.copy_source.is_some();
+    let copy_source = if missing_list_count == 0 {
+        seed_file.copy_source
+    } else {
+        None
+    };
 
-fn parse_existing_file(file_path: &Path) -> Result<ExistingProcedureList> {
-    if !file_path.exists() {
-        return Ok(ExistingProcedureList {
-            next_seq: 1,
-            ..ExistingProcedureList::default()
+    if output_exists && missing_list_count == 0 && missing_detail_sections.is_empty() {
+        return Ok(PendingTerminalBuild::Skip {
+            seeded_from_existing,
+            missing_list: false,
+            missing_detail: false,
         });
     }
-    let contents = fs::read_to_string(file_path)?;
-    let procedure_re = Regex::new(r"Procedure\.(\d+)=(\S+)\.(\S+)")?;
 
-    let mut parsed = ExistingProcedureList::default();
+    Ok(PendingTerminalBuild::Pending(PendingTerminalFile {
+        file_key,
+        path: file_name,
+        base_contents,
+        copy_source,
+        seeded_from_existing,
+        missing_list_count,
+        missing_detail_sections,
+        must_write: missing_list_count > 0 || !output_exists,
+    }))
+}
+
+fn terminal_output_path(icao: &str, proc_code: &str, navdata_path: &Path) -> Option<PathBuf> {
+    match proc_code {
+        "2" => Some(navdata_path.join("Supplemental").join("SID").join(format!("{icao}.sid"))),
+        "1" => Some(navdata_path.join("Supplemental").join("STAR").join(format!("{icao}.star"))),
+        "3" => Some(navdata_path.join("Supplemental").join("STAR").join(format!("{icao}.app"))),
+        "6" => Some(navdata_path.join("Supplemental").join("SID").join(format!("{icao}.sidtrs"))),
+        "A" => Some(navdata_path.join("Supplemental").join("STAR").join(format!("{icao}.apptrs"))),
+        _ => None,
+    }
+}
+
+fn load_seed_terminal_file_contents(
+    permanent_path: &Path,
+    supplemental_root: &Path,
+    file_path: &Path,
+    seeded_existing_file_count: &mut usize,
+) -> Result<SeedTerminalFileContents> {
+    if file_path.exists() {
+        return Ok(SeedTerminalFileContents {
+            contents: fs::read_to_string(file_path)
+                .with_context(|| format!("无法读取 {}", file_path.display()))?,
+            copy_source: None,
+        });
+    }
+
+    let relative = file_path
+        .strip_prefix(supplemental_root)
+        .with_context(|| format!("无法计算相对路径: {}", file_path.display()))?;
+    let source_path = permanent_path.join(relative);
+    if !source_path.exists() {
+        return Ok(SeedTerminalFileContents {
+            contents: String::new(),
+            copy_source: None,
+        });
+    }
+
+    *seeded_existing_file_count += 1;
+    Ok(SeedTerminalFileContents {
+        contents: fs::read_to_string(&source_path)
+            .with_context(|| format!("无法读取 {}", source_path.display()))?,
+        copy_source: Some(source_path),
+    })
+}
+
+struct ParsedTerminalFile {
+    existing: ExistingProcedureList,
+    details: HashMap<String, HashSet<String>>,
+}
+
+struct SeedTerminalFileContents {
+    contents: String,
+    copy_source: Option<PathBuf>,
+}
+
+fn write_terminal_file(
+    file_state: PendingTerminalFile,
+    merged_rows_by_file: &HashMap<TerminalFileKey, IndexedTerminalFileRows<'_>>,
+) -> Result<TerminalWriteOutcome> {
+    let generated_sections = generate_missing_leg_sections(
+        &file_state.file_key,
+        &file_state.missing_detail_sections,
+        merged_rows_by_file,
+    );
+
+    if generated_sections.is_empty() && !file_state.must_write {
+        return Ok(TerminalWriteOutcome {
+            action: TerminalWriteAction::Skipped,
+        });
+    }
+
+    if generated_sections.is_empty() {
+        if let Some(copy_source) = file_state.copy_source.as_ref() {
+            if let Some(parent) = file_state.path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::copy(copy_source, &file_state.path)
+                .with_context(|| format!("无法复制 {} 到 {}", copy_source.display(), file_state.path.display()))?;
+            return Ok(TerminalWriteOutcome {
+                action: TerminalWriteAction::Copied,
+            });
+        }
+    }
+
+    let mut output = file_state.base_contents;
+    if !generated_sections.is_empty() {
+        let trailing_newlines = output.bytes().rev().take_while(|byte| *byte == b'\n').count();
+        if !output.is_empty() && trailing_newlines < 2 {
+            for _ in trailing_newlines..2 {
+                output.push('\n');
+            }
+        }
+        output.push_str(&generated_sections);
+    }
+    if !output.ends_with('\n') {
+        output.push('\n');
+    }
+    if let Some(parent) = file_state.path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(file_state.path, output)?;
+    Ok(TerminalWriteOutcome {
+        action: TerminalWriteAction::Rewritten,
+    })
+}
+
+fn parse_terminal_file_contents(file_path: &Path, contents: &str) -> ParsedTerminalFile {
+    let extension = file_path.extension().and_then(|ext| ext.to_str()).unwrap_or_default();
+    let should_parse_details = matches!(extension, "app" | "apptrs" | "sid" | "sidtrs" | "star");
+
+    let mut existing = ExistingProcedureList::default();
+    let mut details = HashMap::new();
     let mut max_seq = 0usize;
+    let mut in_list_section = false;
+
     for line in contents.lines() {
         if line.starts_with("[list]") {
+            in_list_section = true;
             continue;
         }
         if line.starts_with('[') {
-            break;
+            in_list_section = false;
         }
-        if let Some(caps) = procedure_re.captures(line) {
-            let seq: usize = caps.get(1).unwrap().as_str().parse().unwrap_or_default();
-            let name_rwy = format!("{}.{}", &caps[2], &caps[3]);
-            parsed.map.insert(name_rwy.clone(), seq);
-            parsed.entries.push((name_rwy, seq));
-            max_seq = max_seq.max(seq);
-        }
-    }
-    parsed.next_seq = max_seq + 1;
-    Ok(parsed)
-}
-
-fn process_terminal_file(file_path: &Path, merged_rows: &[MergedLeg]) -> Result<()> {
-    let procedures = parse_procedures(file_path)?;
-    let details = parse_detail_names(file_path)?;
-    let icao = file_path.file_stem().and_then(|stem| stem.to_str()).unwrap_or_default();
-    let results = generate_leg_sections(icao, &procedures, &details, merged_rows);
-
-    let mut lines = fs::read_to_string(file_path)?.lines().map(|line| line.to_string()).collect::<Vec<_>>();
-    lines.push(String::new());
-    lines.extend(results);
-    fs::write(file_path, lines.join("\n") + "\n")?;
-    Ok(())
-}
-
-fn parse_procedures(file_path: &Path) -> Result<HashSet<String>> {
-    let extension = file_path.extension().and_then(|ext| ext.to_str()).unwrap_or_default();
-    if !matches!(extension, "app" | "apptrs" | "sid" | "sidtrs" | "star") {
-        return Ok(HashSet::new());
-    }
-
-    let icao = file_path.file_stem().and_then(|stem| stem.to_str()).unwrap_or_default();
-    let contents = fs::read_to_string(file_path)?;
-    let re = Regex::new(r"Procedure\.(\d+)=(\S+)\.(\S+)")?;
-    let mut started = false;
-    let mut procedures = HashSet::new();
-
-    for line in contents.lines() {
-        if line.starts_with("[list]") {
-            started = true;
+        if in_list_section {
+            if let Some((seq, name, rwy)) = parse_procedure_line(line) {
+                existing.entries.push(ProcedureListEntry {
+                    name: name.to_string(),
+                    rwy: rwy.to_string(),
+                    seq,
+                });
+                existing.map.insert((name.to_string(), rwy.to_string()), seq);
+                insert_procedure_lookup(&mut existing.procedures, name, rwy);
+                max_seq = max_seq.max(seq);
+            }
             continue;
         }
-        if started && line.starts_with('[') {
-            break;
-        }
-        if started {
-            if let Some(caps) = re.captures(line) {
-                procedures.insert(format!("{icao}.{}.{}", &caps[2], &caps[3]));
+        if should_parse_details {
+            if let Some((name, rwy)) = parse_detail_line(line) {
+                insert_lookup_value(&mut details, name, rwy);
             }
         }
     }
 
-    Ok(procedures)
+    existing.next_seq = max_seq + 1;
+
+    ParsedTerminalFile {
+        existing,
+        details,
+    }
 }
 
-fn parse_detail_names(file_path: &Path) -> Result<HashSet<String>> {
-    let contents = fs::read_to_string(file_path)?;
-    let re = Regex::new(r"\[(\S+)\.(\S+)\.(\d+)\]")?;
-    let mut details = HashSet::new();
-    for line in contents.lines() {
-        if let Some(caps) = re.captures(line) {
-            details.insert(format!("{}.{}", &caps[1], &caps[2]));
+fn build_list_file_contents(existing_contents: &str, entries: &[ProcedureListEntry]) -> String {
+    let detail_start = existing_contents
+        .lines()
+        .enumerate()
+        .skip(1)
+        .find_map(|(index, line)| line.starts_with('[').then_some(index))
+        .and_then(|index| nth_line_byte_index(existing_contents, index));
+
+    let suffix = detail_start.map(|start| &existing_contents[start..]).unwrap_or_default();
+    let mut output = String::with_capacity(existing_contents.len() + entries.len().saturating_mul(24));
+    output.push_str("[list]\n");
+    for entry in entries {
+        let _ = writeln!(&mut output, "Procedure.{}={}.{}", entry.seq, entry.name, entry.rwy);
+    }
+    output.push_str(suffix.trim_start_matches('\n'));
+    output
+}
+
+fn nth_line_byte_index(contents: &str, target_index: usize) -> Option<usize> {
+    if target_index == 0 {
+        return Some(0);
+    }
+    let mut line_index = 0usize;
+    for (byte_index, ch) in contents.char_indices() {
+        if ch == '\n' {
+            line_index += 1;
+            if line_index == target_index {
+                return Some(byte_index + ch.len_utf8());
+            }
         }
     }
-    Ok(details)
+    None
 }
 
-fn generate_leg_sections(
-    icao: &str,
-    procedures: &HashSet<String>,
-    details: &HashSet<String>,
-    merged_rows: &[MergedLeg],
-) -> Vec<String> {
-    let mut results = Vec::new();
-    let mut current_transition: Option<String> = None;
-    let mut current_via: Option<String> = None;
+fn build_speed_limit(ex: Option<&TerminalLegExRow>) -> Option<String> {
+    let value = ex?;
+    match (
+        value.speed_limit.as_deref(),
+        value.speed_limit_description.as_deref(),
+    ) {
+        (Some(limit), Some(description)) => {
+            let mut merged = String::with_capacity(limit.len() + description.len());
+            merged.push_str(limit);
+            merged.push_str(description);
+            Some(merged)
+        }
+        (Some(limit), None) => Some(limit.to_string()),
+        (None, Some(description)) => Some(description.to_string()),
+        (None, None) => None,
+    }
+}
+
+fn build_cross_this_point(ex: Option<&TerminalLegExRow>) -> Option<String> {
+    match ex.and_then(|value| value.is_fly_over) {
+        Some(0) => None,
+        Some(value) => Some(format!("{:.1}", value as f64)),
+        None => Some("nan".to_string()),
+    }
+}
+
+fn parse_procedure_line(line: &str) -> Option<(usize, &str, &str)> {
+    let payload = line.strip_prefix("Procedure.")?;
+    let (seq, name_rwy) = payload.split_once('=')?;
+    let (name, rwy) = name_rwy.rsplit_once('.')?;
+    if name.is_empty() || rwy.is_empty() || name.contains(char::is_whitespace) || rwy.contains(char::is_whitespace) {
+        return None;
+    }
+    Some((seq.parse().ok()?, name, rwy))
+}
+
+fn parse_detail_line(line: &str) -> Option<(&str, &str)> {
+    let payload = line.strip_prefix('[')?.strip_suffix(']')?;
+    let mut parts = payload.split('.');
+    let name = parts.next()?;
+    let rwy = parts.next()?;
+    parts.next()?;
+    if name.is_empty() || rwy.is_empty() || name.contains(char::is_whitespace) || rwy.contains(char::is_whitespace) {
+        return None;
+    }
+    Some((name, rwy))
+}
+
+fn merged_leg_file_key(row: &MergedLeg) -> TerminalFileKey {
+    let proc_code = if matches!(row.type_code.as_str(), "6" | "A") {
+        row.type_code.clone()
+    } else {
+        row.proc_code.clone()
+    };
+    TerminalFileKey {
+        icao: row.icao.to_string(),
+        proc_code,
+    }
+}
+
+fn merged_leg_section_key(row: &MergedLeg) -> TerminalSectionKey {
+    if matches!(row.type_code.as_str(), "6" | "A") {
+        TerminalSectionKey {
+            transition: row.transition.clone(),
+            via: row.terminal.to_string(),
+        }
+    } else {
+        TerminalSectionKey {
+            transition: row.terminal.to_string(),
+            via: zfill_runway_value(row.rwy.as_deref()),
+        }
+    }
+}
+
+fn generate_missing_leg_sections(
+    file_key: &TerminalFileKey,
+    missing_detail_sections: &[usize],
+    merged_rows_by_file: &HashMap<TerminalFileKey, IndexedTerminalFileRows<'_>>,
+) -> String {
+    let Some(indexed_rows) = merged_rows_by_file.get(file_key) else {
+        return String::new();
+    };
+    let missing_section_set: HashSet<usize> = missing_detail_sections.iter().copied().collect();
+    let mut output = String::new();
+    let mut current_transition = String::new();
+    let mut current_via = String::new();
     let mut seq = 0usize;
+    let mut wrote_section = false;
 
-    for row in merged_rows.iter().filter(|row| row.icao == icao) {
-        let (transition, via) = if matches!(row.type_code.as_str(), "6" | "A") {
-            (row.transition.clone(), row.terminal.clone())
-        } else {
-            (row.terminal.clone(), zfill_runway_value(row.rwy.clone()))
-        };
-
-        let procedure_name = format!("{}.{}.{}", row.icao, transition, via);
-        let detail_name = format!("{}.{}", transition, via);
-        if !procedures.contains(&procedure_name) || details.contains(&detail_name) {
+    for (section_index, row) in &indexed_rows.ordered_rows {
+        if !missing_section_set.contains(section_index) {
             continue;
         }
-
-        if current_transition.as_deref() != Some(transition.as_str()) || current_via.as_deref() != Some(via.as_str()) {
-            current_transition = Some(transition.clone());
-            current_via = Some(via.clone());
+        let section_key = &indexed_rows.section_keys[*section_index];
+        if current_transition != section_key.transition || current_via != section_key.via {
+            current_transition.clear();
+            current_transition.push_str(&section_key.transition);
+            current_via.clear();
+            current_via.push_str(&section_key.via);
             seq = 0;
         } else {
             seq += 1;
         }
 
-        let mut lines = vec![format!("[{}.{}.{}]", transition, via, seq)];
-        append_leg_field(&mut lines, "Leg", row.leg.clone());
-        append_leg_field(&mut lines, "TurnDirection", row.turn_direction.clone());
-        append_leg_field(&mut lines, "Name", row.name.clone());
-        append_leg_field(&mut lines, "Latitude", opt_string_from_f64(row.latitude));
-        append_leg_field(&mut lines, "Longitude", opt_string_from_f64(row.longitude));
-        append_leg_field(&mut lines, "Frequency", row.frequency.clone());
-        append_leg_field(&mut lines, "NavBear", row.nav_bear.clone());
-        append_leg_field(&mut lines, "NavDist", row.nav_dist.clone());
-        append_leg_field(&mut lines, "Heading", row.heading.clone());
-        append_leg_field(&mut lines, "Dist", row.dist.clone());
-        append_leg_field(&mut lines, "CrossThisPoint", row.cross_this_point.clone());
-        append_leg_field(&mut lines, "Altitude", row.altitude.clone());
-        append_leg_field(&mut lines, "MAP", row.map.map(|value| value.to_string()));
-        append_leg_field(&mut lines, "Slope", row.slope.map(trimmed_float));
-        append_leg_field(&mut lines, "Speed", row.speed.clone());
-        append_leg_field(&mut lines, "CenterLat", opt_string_from_f64(row.center_lat));
-        append_leg_field(&mut lines, "CenterLon", opt_string_from_f64(row.center_lon));
-        results.push(lines.join("\n"));
+        if wrote_section {
+            output.push('\n');
+        }
+        wrote_section = true;
+
+        let _ = writeln!(&mut output, "[{}.{}.{}]", section_key.transition, section_key.via, seq);
+        append_leg_field(&mut output, "Leg", row.leg.as_deref());
+        append_leg_field(&mut output, "TurnDirection", row.turn_direction.as_deref());
+        append_leg_field(&mut output, "Name", row.name.as_deref());
+
+        let latitude = opt_string_from_f64(row.latitude);
+        append_leg_field(&mut output, "Latitude", latitude.as_deref());
+        let longitude = opt_string_from_f64(row.longitude);
+        append_leg_field(&mut output, "Longitude", longitude.as_deref());
+
+        append_leg_field(&mut output, "Frequency", row.frequency.as_deref());
+        append_leg_field(&mut output, "NavBear", row.nav_bear.as_deref());
+        append_leg_field(&mut output, "NavDist", row.nav_dist.as_deref());
+        append_leg_field(&mut output, "Heading", row.heading.as_deref());
+        append_leg_field(&mut output, "Dist", row.dist.as_deref());
+        append_leg_field(&mut output, "CrossThisPoint", row.cross_this_point.as_deref());
+        append_leg_field(&mut output, "Altitude", row.altitude.as_deref());
+
+        let map = row.map.map(|value| value.to_string());
+        append_leg_field(&mut output, "MAP", map.as_deref());
+        let slope = row.slope.map(trimmed_float);
+        append_leg_field(&mut output, "Slope", slope.as_deref());
+        append_leg_field(&mut output, "Speed", row.speed.as_deref());
+
+        let center_lat = opt_string_from_f64(row.center_lat);
+        append_leg_field(&mut output, "CenterLat", center_lat.as_deref());
+        let center_lon = opt_string_from_f64(row.center_lon);
+        append_leg_field(&mut output, "CenterLon", center_lon.as_deref());
+
+        if output.ends_with('\n') {
+            output.pop();
+        }
     }
 
-    results
+    output
 }
 
-fn append_leg_field(lines: &mut Vec<String>, key: &str, value: Option<String>) {
-    if let Some(value) = value {
-        if !value.is_empty() {
-            lines.push(format!("{key}={value}"));
+fn collect_missing_detail_sections(
+    procedures: &HashMap<String, HashSet<String>>,
+    details: &HashMap<String, HashSet<String>>,
+    indexed_rows: Option<&IndexedTerminalFileRows<'_>>,
+) -> Vec<usize> {
+    let Some(indexed_rows) = indexed_rows else {
+        return Vec::new();
+    };
+    let mut missing_sections = Vec::new();
+    for (section_index, section_key) in indexed_rows.section_keys.iter().enumerate() {
+        if !lookup_contains(procedures, &section_key.transition, &section_key.via) {
+            continue;
         }
+        if lookup_contains(details, &section_key.transition, &section_key.via) {
+            continue;
+        }
+        missing_sections.push(section_index);
+    }
+    missing_sections
+}
+
+fn record_seed_breakdown(breakdown: &mut SeedReuseBreakdown, missing_list: bool, missing_detail: bool) {
+    match (missing_list, missing_detail) {
+        (true, true) => breakdown.missing_both += 1,
+        (true, false) => breakdown.missing_list_only += 1,
+        (false, true) => breakdown.missing_detail_only += 1,
+        (false, false) => breakdown.complete += 1,
+    }
+}
+
+fn insert_lookup_value(grouped: &mut HashMap<String, HashSet<String>>, left: &str, right: &str) {
+    grouped
+        .entry(left.to_string())
+        .or_default()
+        .insert(right.to_string());
+}
+
+fn insert_procedure_lookup(grouped: &mut HashMap<String, HashSet<String>>, name: &str, rwy: &str) {
+    if name.is_empty() || rwy.is_empty() {
+        return;
+    }
+    insert_lookup_value(grouped, name, rwy);
+}
+
+fn lookup_contains(grouped: &HashMap<String, HashSet<String>>, left: &str, right: &str) -> bool {
+    grouped.get(left).is_some_and(|values| values.contains(right))
+}
+
+fn append_leg_field(section: &mut String, key: &str, value: Option<&str>) {
+    if let Some(value) = value.filter(|value| !value.is_empty()) {
+        let _ = writeln!(section, "{key}={value}");
     }
 }
 
@@ -909,7 +1374,7 @@ fn join_i64_values(values: &[i64]) -> String {
     values.iter().map(i64::to_string).collect::<Vec<_>>().join(", ")
 }
 
-fn normalize_runway_value(raw_value: Option<String>) -> String {
+fn normalize_runway_value(raw_value: Option<&str>) -> String {
     let Some(raw_value) = raw_value else {
         return "".to_string();
     };
@@ -928,7 +1393,7 @@ fn normalize_runway_value(raw_value: Option<String>) -> String {
     }
 }
 
-fn zfill_runway_value(raw_value: Option<String>) -> String {
+fn zfill_runway_value(raw_value: Option<&str>) -> String {
     let Some(raw_value) = raw_value else {
         return "None".to_string();
     };

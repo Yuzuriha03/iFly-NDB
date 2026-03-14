@@ -1,12 +1,12 @@
 pub mod route;
 
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
 use std::sync::OnceLock;
 
 use anyhow::{Context, Result};
-use rayon::prelude::*;
 use rusqlite::{params, Connection};
 
 use crate::common::{row_opt_f64, row_opt_i64, row_opt_string, row_string};
@@ -25,23 +25,41 @@ struct RunwayTask {
     elevation: f64,
 }
 
-pub fn run(conn: &mut Connection, route_file: &Path, navdata_path: &Path, csv_path: &Path) -> Result<()> {
+struct NavaidRow {
+    ident: String,
+    type_code: i64,
+    name: String,
+    freq: i64,
+    usage: String,
+    latitude: f64,
+    longitude: f64,
+}
+
+pub fn run(
+    conn: &mut Connection,
+    route_file: &Path,
+    navdata_path: &Path,
+    csv_path: &Path,
+) -> Result<()> {
     let Some(start_airport_id) = start_airport_id(conn)? else {
         return Ok(());
     };
-    let started = std::time::Instant::now();
-
     airport(conn, start_airport_id, navdata_path)?;
-    supp(conn, start_airport_id, navdata_path)?;
-    wpnavapt(conn, start_airport_id, navdata_path)?;
-    wpnavaid(conn, navdata_path)?;
-    wpnavfix(conn, navdata_path)?;
-    let generated_route_file = route::wpnavrte(conn, csv_path, navdata_path)?;
-    route::check_route(route_file, &generated_route_file)?;
-    route::insert_route(route_file, &generated_route_file)?;
-    route::order_route(route_file)?;
 
-    println!("Enroute数据转换完毕，用时：{:.3}秒", started.elapsed().as_secs_f64());
+    supp(conn, start_airport_id, navdata_path)?;
+
+    wpnavapt(conn, start_airport_id, navdata_path)?;
+
+    wpnavaid(conn, navdata_path)?;
+
+    wpnavfix(conn, navdata_path)?;
+
+    let generated_route_file = route::wpnavrte(conn, csv_path, navdata_path)?;
+
+    let checked_routes = route::check_route(route_file, &generated_route_file)?;
+
+    route::insert_and_order_route(route_file, &generated_route_file, checked_routes)?;
+    println!("Enroute数据转换完毕");
     Ok(())
 }
 
@@ -121,66 +139,45 @@ fn supp(conn: &Connection, start_airport_id: i64, navdata_path: &Path) -> Result
 }
 
 fn wpnavapt(conn: &Connection, start_airport_id: i64, navdata_path: &Path) -> Result<()> {
-    let start_runway_exists = conn.query_row(
-        "SELECT ID FROM runways WHERE AirportID = ? LIMIT 1",
-        params![start_airport_id],
-        |row| row.get::<_, i64>(0),
-    );
-    if start_runway_exists.is_err() {
-        println!("未找到对应的RunwayID");
-        return Ok(());
-    }
-
-    let mut airport_stmt = conn.prepare("SELECT ID, Name, ICAO FROM airports WHERE ID >= ?")?;
-    let airport_rows: Vec<(i64, String, String)> = airport_stmt
-        .query_map(params![start_airport_id], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-        })?
-        .collect::<rusqlite::Result<_>>()?;
-
-    if airport_rows.is_empty() {
-        println!("未找到需要处理的跑道数据");
-        return Ok(());
-    }
-
     let ils_frequency_cache = load_ils_frequency_cache(conn)?;
-    let mut tasks = Vec::new();
-
-    let mut runway_stmt = conn.prepare(
-        "SELECT ID, Ident, TrueHeading, Length, Latitude, Longtitude, Elevation FROM runways WHERE AirportID = ?",
+    let mut stmt = conn.prepare(
+        "SELECT a.Name, a.ICAO, r.ID, r.Ident, r.TrueHeading, r.Length, r.Latitude, r.Longtitude, r.Elevation \
+         FROM airports a \
+         JOIN runways r ON r.AirportID = a.ID \
+         WHERE a.ID >= ?",
     )?;
+    let runway_rows = stmt.query_map(params![start_airport_id], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, i64>(2)?,
+            row.get::<_, String>(3)?,
+            row_opt_f64(row, 4)?.unwrap_or_default(),
+            row_opt_f64(row, 5)?.unwrap_or_default(),
+            row_opt_f64(row, 6)?.unwrap_or_default(),
+            row_opt_f64(row, 7)?.unwrap_or_default(),
+            row_opt_f64(row, 8)?.unwrap_or_default(),
+        ))
+    })?;
 
-    for (airport_id, airport_name, icao) in airport_rows {
-        let runway_rows = runway_stmt.query_map(params![airport_id], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row_opt_f64(row, 2)?.unwrap_or_default(),
-                row_opt_f64(row, 3)?.unwrap_or_default(),
-                row_opt_f64(row, 4)?.unwrap_or_default(),
-                row_opt_f64(row, 5)?.unwrap_or_default(),
-                row_opt_f64(row, 6)?.unwrap_or_default(),
-            ))
-        })?;
-
-        for runway_row in runway_rows {
-            let (runway_id, ident, true_heading, length, latitude, longitude, elevation) = runway_row?;
-            let frequency = ils_frequency_cache
-                .get(&runway_id)
-                .cloned()
-                .unwrap_or_else(|| "000.00".to_string());
-            tasks.push(RunwayTask {
-                airport_name: airport_name.clone(),
-                icao: icao.clone(),
-                ident,
-                length,
-                latitude,
-                longitude,
-                true_heading,
-                frequency,
-                elevation,
-            });
-        }
+    let mut tasks = Vec::new();
+    for runway_row in runway_rows {
+        let (airport_name, icao, runway_id, ident, true_heading, length, latitude, longitude, elevation) = runway_row?;
+        let frequency = ils_frequency_cache
+            .get(&runway_id)
+            .cloned()
+            .unwrap_or_else(|| "000.00".to_string());
+        tasks.push(RunwayTask {
+            airport_name,
+            icao,
+            ident,
+            length,
+            latitude,
+            longitude,
+            true_heading,
+            frequency,
+            elevation,
+        });
     }
 
     if tasks.is_empty() {
@@ -188,57 +185,57 @@ fn wpnavapt(conn: &Connection, start_airport_id: i64, navdata_path: &Path) -> Re
         return Ok(());
     }
 
+    tasks.sort_by(|left, right| left.icao.cmp(&right.icao).then(left.ident.cmp(&right.ident)));
+
     let declinations = magnetic::batch_get_magnetic_variations(
         &tasks.iter().map(|task| (task.latitude, task.longitude)).collect::<Vec<_>>(),
     )?;
 
-    let mut rows: Vec<(String, String)> = tasks
-        .into_par_iter()
-        .zip(declinations.into_par_iter())
-        .map(|(task, declination)| {
-            let magnetic_heading = (task.true_heading - declination).round() as i64;
-            let line = format!(
-                "{:<24}{}{: <3}{:05}{:03}{:>10.6}{:>11.6}{}{:03}{:05}",
-                task.airport_name,
-                task.icao,
-                task.ident,
-                task.length.round() as i64,
-                magnetic_heading,
-                task.latitude,
-                task.longitude,
-                task.frequency,
-                magnetic_heading,
-                task.elevation.round() as i64,
-            );
-            (format!("{}{}", task.icao, task.ident), line)
-        })
-        .collect();
-
-    rows.sort_by(|left, right| left.0.cmp(&right.0));
-
     let output_folder = navdata_path.join("Supplemental");
     fs::create_dir_all(&output_folder)?;
     let output_file = output_folder.join("wpnavapt.txt");
-    let body = rows.into_iter().map(|(_, line)| line).collect::<Vec<_>>().join("\n") + "\n";
+    let mut body = String::with_capacity(tasks.len().saturating_mul(72));
+    for (task, declination) in tasks.into_iter().zip(declinations) {
+        append_wpnavapt_row(&mut body, &task, declination);
+    }
     fs::write(&output_file, body)?;
 
     println!("已保存到 {}", output_file.display());
     Ok(())
 }
 
-fn load_ils_frequency_cache(conn: &Connection) -> Result<HashMap<i64, String>> {
-    let mut terminal_stmt = conn.prepare("SELECT RwyID, ilsID FROM terminals WHERE RwyID IS NOT NULL AND ilsID IS NOT NULL")?;
-    let runway_ils_pairs: Vec<(i64, i64)> = terminal_stmt
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
-        .collect::<rusqlite::Result<_>>()?;
+fn append_wpnavapt_row(buffer: &mut String, task: &RunwayTask, declination: f64) {
+    let magnetic_heading = (task.true_heading - declination).round() as i64;
+    let _ = writeln!(
+        buffer,
+        "{:<24}{}{: <3}{:05}{:03}{:>10.6}{:>11.6}{}{:03}{:05}",
+        task.airport_name,
+        task.icao,
+        task.ident,
+        task.length.round() as i64,
+        magnetic_heading,
+        task.latitude,
+        task.longitude,
+        task.frequency,
+        magnetic_heading,
+        task.elevation.round() as i64,
+    );
+}
 
-    let mut ils_stmt = conn.prepare("SELECT Freq FROM ILSes WHERE ID = ?")?;
+fn load_ils_frequency_cache(conn: &Connection) -> Result<HashMap<i64, String>> {
+    let mut stmt = conn.prepare(
+        "SELECT t.RwyID, i.Freq \
+         FROM terminals t \
+         JOIN ILSes i ON i.ID = t.ilsID \
+         WHERE t.RwyID IS NOT NULL AND t.ilsID IS NOT NULL",
+    )?;
     let mut cache = HashMap::new();
-    for (runway_id, ils_id) in runway_ils_pairs {
+    let rows = stmt.query_map([], |row| Ok((row.get::<_, i64>(0)?, row_opt_i64(row, 1)?)))?;
+    for row in rows {
+        let (runway_id, freq_value) = row?;
         if cache.contains_key(&runway_id) {
             continue;
         }
-        let freq_value = ils_stmt.query_row(params![ils_id], |row| row_opt_i64(row, 0))?;
         let frequency = freq_value
             .map(format_ils_frequency)
             .unwrap_or_else(|| "000.00".to_string());
@@ -270,69 +267,45 @@ fn wpnavaid(conn: &Connection, navdata_path: &Path) -> Result<()> {
     };
 
     let mut stmt = conn.prepare(
-        "SELECT Ident, Type, Name, Freq, Channel, Usage, Latitude, Longtitude, Elevation FROM navaids WHERE ID > ?",
+        "SELECT Ident, Type, Name, Freq, Channel, Usage, Latitude, Longtitude, Elevation FROM navaids WHERE ID > ? ORDER BY Latitude ASC",
     )?;
     let rows = stmt.query_map(params![start_id], |row| {
-        let ident: String = row.get(0)?;
-        let type_code = row_opt_i64(row, 1)?.unwrap_or_default();
-        let name = row_string(row, 2)?;
-        let freq = row_opt_i64(row, 3)?.unwrap_or_default();
-        let usage = row_string(row, 5)?;
-        let latitude = row_opt_f64(row, 6)?.unwrap_or_default();
-        let longitude = row_opt_f64(row, 7)?.unwrap_or_default();
-        Ok((latitude, format_navaid_row(&ident, type_code, &name, freq, &usage, latitude, longitude)))
+        Ok(NavaidRow {
+            ident: row.get(0)?,
+            type_code: row_opt_i64(row, 1)?.unwrap_or_default(),
+            name: row_string(row, 2)?,
+            freq: row_opt_i64(row, 3)?.unwrap_or_default(),
+            usage: row_string(row, 5)?,
+            latitude: row_opt_f64(row, 6)?.unwrap_or_default(),
+            longitude: row_opt_f64(row, 7)?.unwrap_or_default(),
+        })
     })?;
-
-    let mut converted = rows.collect::<rusqlite::Result<Vec<_>>>()?;
-    converted.sort_by(|left, right| left.0.partial_cmp(&right.0).unwrap_or(std::cmp::Ordering::Equal));
 
     let output_folder = navdata_path.join("Supplemental");
     fs::create_dir_all(&output_folder)?;
     let output_file = output_folder.join("wpnavaid.txt");
-    let body = converted
-        .into_iter()
-        .map(|(_, line)| line)
-        .collect::<Vec<_>>()
-        .join("\n")
-        + "\n";
+    let mut body = String::new();
+    for row in rows {
+        append_navaid_row(&mut body, &row?);
+    }
     fs::write(&output_file, body)?;
     println!("wpnavaid.txt已保存到 {}", output_file.display());
     Ok(())
 }
 
-fn format_navaid_row(ident: &str, type_code: i64, name: &str, freq: i64, usage: &str, latitude: f64, longitude: f64) -> String {
-    let type_text = match type_code {
-        1 => "VOR",
-        2 | 4 => "VORD",
-        3 | 9 => "DME",
-        5 => "NDB",
-        7 => "NDBD",
-        8 => "ILSD",
-        _ => "",
-    };
-    let frequency = format_ils_frequency(freq);
-    let final_letter = usage.chars().last().unwrap_or_default();
-    format!(
-        "{:<24}{:<5}{:<4}{:>10.6}{:>11.6}{}{final_letter}",
-        truncate_left(name, 24),
-        ident,
-        type_text,
-        latitude,
-        longitude,
-        frequency,
-    )
-}
-
 fn wpnavfix(conn: &Connection, navdata_path: &Path) -> Result<()> {
-    let mut stmt = conn.prepare("SELECT ID FROM waypoints WHERE Ident = '89E80'")?;
-    let ids: Vec<i64> = stmt
-        .query_map([], |row| row.get(0))?
-        .collect::<rusqlite::Result<_>>()?;
-    if ids.len() < 2 {
-        println!("没有足够的记录");
-        return Ok(());
-    }
-    let second_id = ids[1];
+    let second_id: i64 = match conn.query_row(
+        "SELECT ID FROM waypoints WHERE Ident = '89E80' ORDER BY ID LIMIT 1 OFFSET 1",
+        [],
+        |row| row.get(0),
+    ) {
+        Ok(id) => id,
+        Err(rusqlite::Error::QueryReturnedNoRows) => {
+            println!("没有足够的记录");
+            return Ok(());
+        }
+        Err(error) => return Err(error).context("查询 wpnavfix 起始记录失败"),
+    };
 
     let mut waypoint_stmt = conn.prepare(
         "SELECT Ident, Latitude, Longtitude FROM waypoints WHERE ID > ? ORDER BY Latitude ASC",
@@ -344,25 +317,44 @@ fn wpnavfix(conn: &Connection, navdata_path: &Path) -> Result<()> {
         }
         let latitude = row_opt_f64(row, 1)?.unwrap_or_default();
         let longitude = row_opt_f64(row, 2)?.unwrap_or_default();
-        Ok((
-            latitude,
-            format!("{:<24}{:<5}{:>10.6}{:>11.6}", ident, ident, latitude, longitude),
-        ))
+        Ok((ident, latitude, longitude))
     })?;
 
-    let converted = rows.collect::<rusqlite::Result<Vec<_>>>()?;
     let output_folder = navdata_path.join("Supplemental");
     fs::create_dir_all(&output_folder)?;
     let output_file = output_folder.join("wpnavfix.txt");
-    let body = converted
-        .into_iter()
-        .map(|(_, line)| line)
-        .collect::<Vec<_>>()
-        .join("\n")
-        + "\n";
+    let mut body = String::new();
+    for row in rows {
+        let (ident, latitude, longitude) = row?;
+        let _ = writeln!(body, "{:<24}{:<5}{:>10.6}{:>11.6}", ident, ident, latitude, longitude);
+    }
     fs::write(&output_file, body)?;
     println!("wpnavfix已保存到 {}", output_file.display());
     Ok(())
+}
+
+fn append_navaid_row(buffer: &mut String, row: &NavaidRow) {
+    let type_text = match row.type_code {
+        1 => "VOR",
+        2 | 4 => "VORD",
+        3 | 9 => "DME",
+        5 => "NDB",
+        7 => "NDBD",
+        8 => "ILSD",
+        _ => "",
+    };
+    let frequency = format_ils_frequency(row.freq);
+    let final_letter = row.usage.chars().last().unwrap_or_default();
+    let _ = writeln!(
+        buffer,
+        "{:<24}{:<5}{:<4}{:>10.6}{:>11.6}{}{final_letter}",
+        truncate_left(&row.name, 24),
+        row.ident,
+        type_text,
+        row.latitude,
+        row.longitude,
+        frequency,
+    );
 }
 
 fn truncate_left(text: &str, len: usize) -> String {

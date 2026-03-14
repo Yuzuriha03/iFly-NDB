@@ -24,10 +24,8 @@ struct Cli {
     start_terminal_id: Option<i64>,
     #[arg(long)]
     end_terminal_id: Option<i64>,
-    #[arg(long, default_value_t = false)]
+    #[arg(long)]
     skip_layout_update: bool,
-    #[arg(long, default_value_t = false)]
-    skip_countdown: bool,
 }
 
 fn main() {
@@ -40,7 +38,8 @@ fn main() {
 fn run() -> Result<()> {
     let cli = Cli::parse();
 
-    let mut conn = match cli.db_path {
+    let db_path = cli.db_path.clone();
+    let mut conn = match db_path {
         Some(path) => common::open_fenix_connection(&path)?,
         None => loop {
             let path = common::prompt_path("请输入Fenix的nd.db3文件路径：", ".db3")?;
@@ -51,15 +50,12 @@ fn run() -> Result<()> {
         },
     };
 
-    let csv_path = match cli.csv_path {
+    let csv_path = match cli.csv_path.clone() {
         Some(path) => path,
         None => common::prompt_path("请输入NAIP RTE_SEG.csv文件路径：", "RTE_SEG.csv")?,
     };
 
-    let (route_file, navdata_path, other_paths) = common::resolve_navdata_paths(
-        cli.route_file,
-        cli.navdata_path,
-    )?;
+    let (route_file, navdata_path, other_paths) = common::resolve_navdata_paths(cli.route_file, cli.navdata_path)?;
 
     let (start_terminal_id, end_terminal_id) = common::resolve_terminal_range(
         cli.start_terminal_id,
@@ -70,7 +66,12 @@ fn run() -> Result<()> {
     enroute::run(&mut conn, &route_file, &navdata_path, &csv_path)?;
 
     println!("开始处理Terminals部分");
-    terminals::run(&conn, &navdata_path, start_terminal_id, end_terminal_id)?;
+    terminals::run(
+        &conn,
+        &navdata_path,
+        start_terminal_id,
+        end_terminal_id,
+    )?;
 
     common::delete_data_navdatasupplemental(&navdata_path)?;
     if !cli.skip_layout_update {
@@ -81,9 +82,7 @@ fn run() -> Result<()> {
         common::sync_navdata_to_other_path(&navdata_path, &target_path, !cli.skip_layout_update)?;
     }
 
-    if !cli.skip_countdown {
-        common::countdown_timer(10);
-    }
+    common::countdown_timer(10);
 
     Ok(())
 }

@@ -11,3 +11,5 @@ PySrc/Enroute/Route/__pycache__
 Cargo.lock
 /target
 build_release.ps1
+/debug
+/reports

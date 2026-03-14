@@ -176,7 +176,7 @@ fn to_crlf(input: &str) -> String {
 mod tests {
     use super::update_layout_json;
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::Path;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use serde_json::Value;
@@ -195,7 +195,7 @@ mod tests {
         result.expect("layout update test failed");
     }
 
-    fn run_layout_update_test(temp_root: &PathBuf) -> anyhow::Result<()> {
+    fn run_layout_update_test(temp_root: &Path) -> anyhow::Result<()> {
         fs::create_dir_all(temp_root.join("SimObjects"))?;
         fs::create_dir_all(temp_root.join("_CVT_"))?;
 

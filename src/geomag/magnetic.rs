@@ -11,19 +11,18 @@ const WMM_HIGH_RESOLUTION: &str = include_str!("magcof/WMMHR.COF");
 static MODEL: OnceLock<MagneticModel> = OnceLock::new();
 static MODEL_PATH: OnceLock<PathBuf> = OnceLock::new();
 
-pub(crate) fn get_magnetic_variation(lat: f64, lon: f64) -> Result<f64> {
-    let model = shared_model()?;
-    let (_, _, _, _, _, _, declination, _, _, _, _, _, _, _) = model
-        .calculate(0.0, lat, lon, current_decimal_year())
-        .map_err(|error| anyhow::anyhow!(error.to_string()))
-        .with_context(|| format!("geomag calculation failed for lat={lat}, lon={lon}"))?;
-    Ok((declination * 10.0).round() / 10.0)
-}
-
 pub(crate) fn batch_get_magnetic_variations(coordinates: &[(f64, f64)]) -> Result<Vec<f64>> {
+    let model = shared_model()?;
+    let decimal_year = current_decimal_year();
     coordinates
         .iter()
-        .map(|&(lat, lon)| get_magnetic_variation(lat, lon))
+        .map(|&(lat, lon)| {
+            let (_, _, _, _, _, _, declination, _, _, _, _, _, _, _) = model
+                .calculate(0.0, lat, lon, decimal_year)
+                .map_err(|error| anyhow::anyhow!(error.to_string()))
+                .with_context(|| format!("geomag calculation failed for lat={lat}, lon={lon}"))?;
+            Ok((declination * 10.0).round() / 10.0)
+        })
         .collect()
 }
 

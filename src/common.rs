@@ -48,8 +48,8 @@ pub fn prompt_line(prompt: &str) -> Result<String> {
 
 pub fn sanitize_input_path(raw: &str) -> String {
     raw.trim()
-        .trim_start_matches(|c| c == '\'' || c == '"' || c == '&' || c == ' ')
-        .trim_end_matches(|c| c == '\'' || c == '"' || c == ' ')
+    .trim_start_matches(['\'', '"', '&', ' '])
+    .trim_end_matches(['\'', '"', ' '])
         .to_string()
 }
 
