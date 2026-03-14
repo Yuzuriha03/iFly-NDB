@@ -2,7 +2,7 @@ mod common;
 mod enroute;
 mod geomag;
 mod layout;
-mod terminals;
+mod terminal;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -58,7 +58,7 @@ fn run() -> Result<()> {
         cli.start_terminal_id,
         cli.end_terminal_id,
     )?;
-    let terminals_prepare_task = spawn_terminals_prepare_task(
+    let terminal_prepare_task = spawn_terminal_prepare_task(
         db_path.clone(),
         start_terminal_id,
         end_terminal_id,
@@ -71,8 +71,8 @@ fn run() -> Result<()> {
     )?;
     let _validated_conn = join_worker(db_connection_task, "数据库连接与校验任务")??;
     let prepared_enroute = join_worker(enroute_prepare_task, "Enroute 预加载任务")??.map(Arc::new);
-    let prepared_terminals = Arc::new(
-        join_worker(terminals_prepare_task, "Terminals 预加载任务")??,
+    let prepared_terminal = Arc::new(
+        join_worker(terminal_prepare_task, "Terminals 预加载任务")??,
     );
 
     common::announce_navdata_targets(&navdata_targets);
@@ -88,7 +88,7 @@ fn run() -> Result<()> {
             process_navdata_target(
                 target,
                 prepared_enroute.as_deref(),
-                prepared_terminals.as_ref(),
+                prepared_terminal.as_ref(),
                 cli.skip_layout_update,
             )?;
         }
@@ -105,7 +105,7 @@ fn run() -> Result<()> {
                     process_navdata_target(
                         target,
                         prepared_enroute.as_deref(),
-                        prepared_terminals.as_ref(),
+                        prepared_terminal.as_ref(),
                         cli.skip_layout_update,
                     )
                 })
@@ -156,15 +156,15 @@ fn spawn_navdata_detect_task(
     Some(thread::spawn(common::auto_detect_navdata_paths))
 }
 
-fn spawn_terminals_prepare_task(
+fn spawn_terminal_prepare_task(
     db_path: PathBuf,
     start_terminal_id: i64,
     end_terminal_id: i64,
-) -> JoinHandle<Result<terminals::PreparedTerminalData>> {
+) -> JoinHandle<Result<terminal::PreparedTerminalData>> {
     thread::spawn(move || {
         let conn = common::open_fenix_connection(&db_path)
             .with_context(|| format!("Terminals 预加载时无法连接数据库: {}", db_path.display()))?;
-        terminals::prepare(&conn, start_terminal_id, end_terminal_id).with_context(|| {
+        terminal::prepare(&conn, start_terminal_id, end_terminal_id).with_context(|| {
             format!(
                 "Terminals 预加载失败: TerminalID {}-{}",
                 start_terminal_id,
@@ -214,7 +214,7 @@ fn panic_payload_to_string(payload: Box<dyn std::any::Any + Send + 'static>) -> 
 fn process_navdata_target(
     target: common::NavdataTarget,
     prepared_enroute: Option<&enroute::PreparedEnrouteData>,
-    prepared_terminals: &terminals::PreparedTerminalData,
+    prepared_terminals: &terminal::PreparedTerminalData,
     skip_layout_update: bool,
 ) -> Result<()> {
     let target_label = target_label(&target);
@@ -225,7 +225,7 @@ fn process_navdata_target(
         println!("[{target_label}] Enroute数据转换完毕");
     }
 
-    terminals::write_prepared(prepared_terminals, &target.navdata_path)
+    terminal::write_prepared(prepared_terminals, &target.navdata_path)
         .with_context(|| format!("处理 Terminals 目录失败: {}", target.navdata_path.display()))?;
     println!("[{target_label}] Terminal数据转换完毕");
 
