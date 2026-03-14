@@ -3,7 +3,7 @@ import re
 import warnings
 import pandas as pd
 import concurrent.futures
-from Terminals.merged_data import generate_merged_data
+from Terminal.merged_data import generate_merged_data
 
 warnings.filterwarnings('ignore')
 

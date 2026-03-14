@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fs;
 use std::io::{self, Write};
@@ -112,6 +113,7 @@ pub fn resolve_navdata_paths(
     }
 
     auto_detect_route_file().or_else(|_| {
+        eprintln!("无法找到iFly航路文件目录，请手动指定路径：");
         let route_file = prompt_path(
             "请输入iFly航路文件路径(位于Community\\ifly-aircraft-737max8\\Data\\navdata\\Permanent\\WPNAVRTE.txt)：",
             "WPNAVRTE.txt",
@@ -266,7 +268,7 @@ fn value_ref_to_string(value: ValueRef<'_>) -> Option<String> {
 }
 
 fn auto_detect_route_file() -> Result<(PathBuf, PathBuf, Vec<PathBuf>)> {
-    let checks = [
+    let paths_to_check = [
         (
             "MSFS2020 (Microsoft Store)",
             expand_env(r"%LocalAppData%\Packages\Microsoft.FlightSimulator_8wekyb3d8bbwe\LocalCache\UserCfg.opt"),
@@ -285,8 +287,8 @@ fn auto_detect_route_file() -> Result<(PathBuf, PathBuf, Vec<PathBuf>)> {
         ),
     ];
 
-    let mut available_navdata = Vec::new();
-    for (name, cfg_path) in checks {
+    let mut route_files = Vec::new();
+    for (name, cfg_path) in paths_to_check {
         if !cfg_path.exists() {
             continue;
         }
@@ -304,26 +306,33 @@ fn auto_detect_route_file() -> Result<(PathBuf, PathBuf, Vec<PathBuf>)> {
                 .join("navdata")
                 .join("Permanent")
                 .join("WPNAVRTE.txt");
-            if route_file.exists() {
-                available_navdata.push((name.to_string(), route_file));
-            }
+            route_files.push((name.to_string(), route_file));
         }
     }
 
-    if available_navdata.is_empty() {
+    if route_files.is_empty() {
         bail!("无法自动找到 iFly 航路文件目录");
     }
 
-    if available_navdata.len() > 1 {
+    let available_files: Vec<(String, PathBuf)> = route_files
+        .into_iter()
+        .filter(|(_, route_file)| route_file.exists())
+        .collect();
+
+    if available_files.is_empty() {
+        bail!("无法自动找到 iFly 航路文件目录");
+    }
+
+    if available_files.len() > 1 {
         println!("找到多个航路文件目录，将自动处理所有目录:");
-        for (index, (name, route_file)) in available_navdata.iter().enumerate() {
+        for (index, (name, route_file)) in available_files.iter().enumerate() {
             println!("{}: {} 目录 - {}", index + 1, name, route_file.display());
         }
     }
 
-    let route_file = available_navdata[0].1.clone();
+    let route_file = available_files[0].1.clone();
     let navdata_path = derive_navdata_path(&route_file);
-    let other_paths = available_navdata
+    let other_paths = available_files
         .iter()
         .skip(1)
         .map(|(_, path)| derive_navdata_path(path))
@@ -349,10 +358,34 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
 }
 
 fn expand_env(input: &str) -> PathBuf {
-    let mut output = input.to_string();
-    for (name, value) in std::env::vars() {
-        output = output.replace(&format!("%{name}%"), &value);
+    let env_map: HashMap<String, String> = std::env::vars()
+        .map(|(name, value)| (name.to_ascii_lowercase(), value))
+        .collect();
+
+    let mut output = String::with_capacity(input.len());
+    let mut remaining = input;
+
+    while let Some(start) = remaining.find('%') {
+        output.push_str(&remaining[..start]);
+        let placeholder = &remaining[start + 1..];
+        let Some(end) = placeholder.find('%') else {
+            output.push_str(&remaining[start..]);
+            return PathBuf::from(output);
+        };
+
+        let variable_name = &placeholder[..end];
+        if let Some(value) = env_map.get(&variable_name.to_ascii_lowercase()) {
+            output.push_str(value);
+        } else {
+            output.push('%');
+            output.push_str(variable_name);
+            output.push('%');
+        }
+
+        remaining = &placeholder[end + 1..];
     }
+
+    output.push_str(remaining);
     PathBuf::from(output)
 }
 

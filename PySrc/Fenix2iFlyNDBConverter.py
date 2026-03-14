@@ -8,7 +8,7 @@ import sqlite3
 import warnings
 import subprocess
 from Enroute.enroute import enroute
-from Terminals.legs import terminals
+from Terminal.legs import terminals
 
 warnings.filterwarnings('ignore')
 

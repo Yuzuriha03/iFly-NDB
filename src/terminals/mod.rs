@@ -144,7 +144,7 @@ pub fn run(conn: &Connection, navdata_path: &Path, start_terminal_id: i64, end_t
 }
 
 fn copy_existing_terminal_files(permanent_path: &Path, supplemental_path: &Path) -> Result<()> {
-    let allowed_prefixes = ["VQPR", "ZB", "ZG", "ZH", "ZJ", "ZL", "ZP", "ZS", "ZU", "ZW", "ZY"];
+    let allowed_prefixes = ["OPGT", "VHHX", "ZB", "ZG", "ZH", "ZJ", "ZL", "ZP", "ZS", "ZU", "ZW", "ZY"];
     let allowed_extensions = ["sid", "sidtrs", "app", "apptrs", "star", "startrs"];
 
     for entry in WalkDir::new(permanent_path).into_iter().filter_map(Result::ok) {
@@ -273,7 +273,7 @@ fn generate_merged_data(conn: &Connection, start_terminal_id: i64, end_terminal_
 
 fn load_airports(conn: &Connection) -> Result<Vec<Airport>> {
     let mut stmt = conn.prepare(
-        "SELECT ID, ICAO FROM Airports WHERE ICAO IN ('VQPR', 'OPGT') OR SUBSTR(ICAO, 1, 2) IN ('ZB', 'ZG', 'ZH', 'ZJ', 'ZL', 'ZP', 'ZS', 'ZU', 'ZW', 'ZY')",
+        "SELECT ID, ICAO FROM Airports WHERE ICAO IN ('OPGT', 'VHHX') OR SUBSTR(ICAO, 1, 2) IN ('ZB', 'ZG', 'ZH', 'ZJ', 'ZL', 'ZP', 'ZS', 'ZU', 'ZW', 'ZY')",
     )?;
     let rows = stmt.query_map([], |row| {
         Ok(Airport {
