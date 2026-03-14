@@ -1,0 +1,23 @@
+[package]
+name = "ifly_ndb_converter"
+version = "0.1.0"
+edition = "2021"
+build = "build.rs"
+
+[dependencies]
+anyhow = "1"
+chrono = { version = "0.4", default-features = true }
+clap = { version = "4", features = ["derive"] }
+csv = "1"
+encoding_rs = "0.8"
+geographiclib-rs = "0.2.7"
+geomag-wmm = "0.1.0"
+rayon = "1"
+regex = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+walkdir = "2"
+
+[build-dependencies]
+winresource = "0.1"

@@ -11,7 +11,7 @@
 
 本项目使用 GNU General Public License v3.0 许可证。
 
-本项目使用了 [MSFSLayoutGenerator](https://github.com/HughesMDflyer4/MSFSLayoutGenerator) 工具，该工具基于 MIT 许可证发布。
+本项目内置了基于 [MSFSLayoutGenerator](https://github.com/HughesMDflyer4/MSFSLayoutGenerator) 移植的 layout.json / manifest.json 更新逻辑，原项目基于 MIT 许可证发布。
 Copyright (c) 2020 HughesMDflyer4
 
 MSFSLayoutGenerator 的许可证全文如下：
