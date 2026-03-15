@@ -4,7 +4,6 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
-use std::sync::OnceLock;
 
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection};
@@ -66,9 +65,9 @@ pub fn write_prepared(
 ) -> Result<()> {
     write_airport_data(navdata_path, &prepared.airport_data)?;
     write_supp_files(navdata_path, &prepared.supp_files)?;
-    write_optional_supplemental_file(navdata_path, "wpnavapt.txt", prepared.wpnavapt_data.as_deref())?;
-    write_optional_supplemental_file(navdata_path, "wpnavaid.txt", prepared.wpnavaid_data.as_deref())?;
-    write_optional_supplemental_file(navdata_path, "wpnavfix.txt", prepared.wpnavfix_data.as_deref())?;
+    write_optional_supplemental_file(navdata_path, "WPNAVAPT.txt", prepared.wpnavapt_data.as_deref())?;
+    write_optional_supplemental_file(navdata_path, "WPNAVAID.txt", prepared.wpnavaid_data.as_deref())?;
+    write_optional_supplemental_file(navdata_path, "WPNAVFIX.txt", prepared.wpnavfix_data.as_deref())?;
 
     let generated_route_file = route::write_prepared_wpnavrte(&prepared.route_data, navdata_path)?;
     let checked_routes = route::check_route(route_file, &generated_route_file)?;
@@ -114,8 +113,8 @@ fn build_airport_data(conn: &Connection, start_id: i64) -> Result<String> {
 fn write_airport_data(navdata_path: &Path, contents: &str) -> Result<()> {
     let output_folder = navdata_path.join("Supplemental");
     fs::create_dir_all(&output_folder)?;
-    let output_file = output_folder.join("airports.dat");
-    fs::write(&output_file, contents)?;
+    let output_file = output_folder.join("AIRPORTS.dat");
+    crate::common::write_text_file(&output_file, contents)?;
     Ok(())
 }
 
@@ -154,7 +153,7 @@ fn write_supp_files(navdata_path: &Path, supp_files: &[(String, String)]) -> Res
     let output_folder = navdata_path.join("Supplemental").join("Supp");
     fs::create_dir_all(&output_folder)?;
     for (file_name, contents) in supp_files {
-        fs::write(output_folder.join(file_name), contents)?;
+        crate::common::write_text_file(&output_folder.join(file_name), contents)?;
     }
     Ok(())
 }
@@ -349,7 +348,7 @@ fn write_optional_supplemental_file(
     let output_folder = navdata_path.join("Supplemental");
     fs::create_dir_all(&output_folder)?;
     let output_file = output_folder.join(file_name);
-    fs::write(&output_file, contents)?;
+    crate::common::write_text_file(&output_file, contents)?;
     Ok(())
 }
 
@@ -384,11 +383,4 @@ fn truncate_left(text: &str, len: usize) -> String {
     } else {
         padded[padded.len() - len..].to_string()
     }
-}
-
-static EMPTY: OnceLock<String> = OnceLock::new();
-
-#[allow(dead_code)]
-fn empty_string() -> &'static str {
-    EMPTY.get_or_init(String::new)
 }

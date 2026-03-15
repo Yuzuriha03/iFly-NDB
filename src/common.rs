@@ -64,7 +64,7 @@ pub fn prompt_path(prompt: &str, expected_suffix: &str) -> Result<PathBuf> {
     loop {
         let raw = prompt_line(prompt)?;
         let path_text = sanitize_input_path(&raw);
-        println!("{path_text}");
+        println!("已输入路径：{path_text}");
         let path = PathBuf::from(&path_text);
         if path.exists() && path_text.ends_with(expected_suffix) {
             return Ok(path);
@@ -147,7 +147,17 @@ pub fn auto_detect_navdata_paths() -> Result<Vec<NavdataTarget>> {
 }
 
 pub fn announce_navdata_targets(targets: &[NavdataTarget]) {
-    if targets.len() <= 1 {
+    if targets.is_empty() {
+        return;
+    }
+
+    if targets.len() == 1 {
+        let target = &targets[0];
+        println!(
+            "检测到航路文件目录: {} 目录 - {}",
+            target.source_label,
+            target.route_file.display()
+        );
         return;
     }
 
@@ -229,6 +239,16 @@ pub fn countdown_timer(seconds: u64) {
     println!();
 }
 
+pub fn to_crlf(input: &str) -> String {
+    input.replace("\r\n", "\n").replace('\n', "\r\n")
+}
+
+pub fn write_text_file(path: &Path, contents: &str) -> Result<()> {
+    fs::write(path, to_crlf(contents))
+        .with_context(|| format!("无法写入 {}", path.display()))?;
+    Ok(())
+}
+
 pub fn row_opt_string(row: &Row<'_>, idx: usize) -> rusqlite::Result<Option<String>> {
     let value = row.get_ref(idx)?;
     Ok(value_ref_to_string(value))
@@ -292,21 +312,24 @@ fn auto_detect_route_file() -> Result<Vec<NavdataTarget>> {
             "MSFS2020 (Steam)",
             expand_env(r"%AppData%\Roaming\Microsoft Flight Simulator\UserCfg.opt"),
         ),
+    ];
+
+    let mut route_files = vec![
         (
-            "MSFS2024 (Microsoft Store)",
-            expand_env(r"%LocalAppData%\Packages\Microsoft.Limitless_8wekyb3d8bbwe\LocalCache\UserCfg.opt"),
+            "MSFS2024 (Microsoft Store)".to_string(),
+            expand_env(r"%LocalAppData%\Packages\Microsoft.Limitless_8wekyb3d8bbwe\LocalState\WASM\MSFS2020\ifly-aircraft-737max8\work\navdata\Permanent\WPNAVRTE.txt"),
         ),
         (
-            "MSFS2024 (Steam)",
-            expand_env(r"%AppData%\Roaming\Microsoft Flight Simulator 2024\UserCfg.opt"),
+            "MSFS2024 (Steam)".to_string(),
+            expand_env(r"%AppData%\Microsoft Flight Simulator 2024\WASM\MSFS2020\ifly-aircraft-737max8\work\navdata\Permanent\WPNAVRTE.txt"),
         ),
     ];
 
-    let mut route_files = Vec::new();
     for (name, cfg_path) in paths_to_check {
         if !cfg_path.exists() {
             continue;
         }
+
         let contents = fs::read_to_string(&cfg_path)
             .with_context(|| format!("无法读取 {}", cfg_path.display()))?;
         if let Some(installed_packages_path) = contents

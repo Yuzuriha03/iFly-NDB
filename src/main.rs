@@ -221,16 +221,16 @@ fn process_navdata_target(
 
     if let Some(prepared_enroute) = prepared_enroute {
         enroute::write_prepared(prepared_enroute, &target.route_file, &target.navdata_path)
-            .with_context(|| format!("处理 Enroute 目录失败: {}", target.navdata_path.display()))?;
+            .with_context(|| format!("处理 Enroute 失败: {}", target.navdata_path.display()))?;
         println!("[{target_label}] Enroute数据转换完毕");
     }
 
     terminal::write_prepared(prepared_terminals, &target.navdata_path)
-        .with_context(|| format!("处理 Terminals 目录失败: {}", target.navdata_path.display()))?;
+        .with_context(|| format!("处理 Terminal 失败: {}", target.navdata_path.display()))?;
     println!("[{target_label}] Terminal数据转换完毕");
 
     common::delete_data_navdatasupplemental(&target.navdata_path)?;
-    if !skip_layout_update {
+    if !skip_layout_update && !target_label.starts_with("MSFS2024") {
         common::update_layout_json(&target.navdata_path)?;
     }
     Ok(())

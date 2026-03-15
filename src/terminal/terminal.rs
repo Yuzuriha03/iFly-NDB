@@ -145,21 +145,8 @@ struct IndexedTerminalFileRows<'a> {
     ordered_rows: Vec<(usize, &'a MergedLeg)>,
 }
 
-#[allow(dead_code)]
-#[derive(Default)]
-struct SeedReuseBreakdown {
-    missing_list_only: usize,
-    missing_detail_only: usize,
-    missing_both: usize,
-    complete: usize,
-}
-
 struct TerminalWriteResult {
     files: Vec<PendingTerminalFile>,
-    #[allow(dead_code)]
-    seeded_existing_file_count: usize,
-    #[allow(dead_code)]
-    seed_breakdown: SeedReuseBreakdown,
 }
 
 struct PendingTerminalFile {
@@ -167,31 +154,13 @@ struct PendingTerminalFile {
     path: PathBuf,
     base_contents: String,
     copy_source: Option<PathBuf>,
-    seeded_from_existing: bool,
-    missing_list_count: usize,
     missing_detail_sections: Vec<usize>,
     must_write: bool,
 }
 
 enum PendingTerminalBuild {
-    Skip {
-        seeded_from_existing: bool,
-        missing_list: bool,
-        missing_detail: bool,
-    },
+    Skip,
     Pending(PendingTerminalFile),
-}
-
-#[allow(dead_code)]
-enum TerminalWriteAction {
-    Skipped,
-    Copied,
-    Rewritten,
-}
-
-#[allow(dead_code)]
-struct TerminalWriteOutcome {
-    action: TerminalWriteAction,
 }
 
 enum CoordinateNameLookup<'a> {
@@ -234,12 +203,12 @@ pub fn write_prepared(prepared: &PreparedTerminalData, navdata_path: &Path) -> R
     )?;
 
     for pending_file in write_result.files {
-        let _ = write_terminal_file(pending_file, &merged_rows_by_file)?;
+        write_terminal_file(pending_file, &merged_rows_by_file)?;
     }
 
-    fs::write(
-        supplemental_path.join("FMC_Ident.txt"),
-        format!("[Ident]\nSuppData=NAIP-{}\n", prepared.revision),
+    crate::common::write_text_file(
+        &supplemental_path.join("FMC_Ident.txt"),
+        &format!("[Ident]\nSuppData=NAIP-{}\n", prepared.revision),
     )?;
     Ok(())
 }
@@ -732,8 +701,8 @@ fn write_terminal_lists(
     permanent_path: &Path,
     navdata_path: &Path,
 ) -> Result<TerminalWriteResult> {
-    let supplemental_sid = navdata_path.join("Supplemental").join("SID");
-    let supplemental_star = navdata_path.join("Supplemental").join("STAR");
+    let supplemental_sid = navdata_path.join("Supplemental").join("Sid");
+    let supplemental_star = navdata_path.join("Supplemental").join("Star");
     fs::create_dir_all(&supplemental_sid)?;
     fs::create_dir_all(&supplemental_star)?;
 
@@ -743,8 +712,6 @@ fn write_terminal_lists(
     }
 
     let mut files = Vec::new();
-    let mut copied_existing_file_count = 0usize;
-    let mut seed_breakdown = SeedReuseBreakdown::default();
     for ((icao, proc_code), rows) in grouped {
         match write_list_file(
             &icao,
@@ -753,36 +720,14 @@ fn write_terminal_lists(
             merged_rows_by_file,
             permanent_path,
             navdata_path,
-            &mut copied_existing_file_count,
         )? {
-            PendingTerminalBuild::Skip {
-                seeded_from_existing,
-                missing_list,
-                missing_detail,
-            } => {
-                if seeded_from_existing {
-                    record_seed_breakdown(&mut seed_breakdown, missing_list, missing_detail);
-                }
-            }
-            PendingTerminalBuild::Pending(file_state) => {
-                if file_state.seeded_from_existing {
-                    record_seed_breakdown(
-                        &mut seed_breakdown,
-                        file_state.missing_list_count > 0,
-                        !file_state.missing_detail_sections.is_empty(),
-                    );
-                }
-                files.push(file_state);
-            }
+            PendingTerminalBuild::Skip => {}
+            PendingTerminalBuild::Pending(file_state) => files.push(file_state),
         }
     }
 
     files.sort_by(|left, right| left.path.cmp(&right.path));
-    Ok(TerminalWriteResult {
-        files,
-        seeded_existing_file_count: copied_existing_file_count,
-        seed_breakdown,
-    })
+    Ok(TerminalWriteResult { files })
 }
 
 fn build_terminal_list_rows(
@@ -863,14 +808,9 @@ fn write_list_file(
     merged_rows_by_file: &HashMap<TerminalFileKey, IndexedTerminalFileRows<'_>>,
     permanent_path: &Path,
     navdata_path: &Path,
-    seeded_existing_file_count: &mut usize,
 ) -> Result<PendingTerminalBuild> {
     let Some(file_name) = terminal_output_path(icao, proc_code, navdata_path) else {
-        return Ok(PendingTerminalBuild::Skip {
-            seeded_from_existing: false,
-            missing_list: false,
-            missing_detail: false,
-        });
+        return Ok(PendingTerminalBuild::Skip);
     };
     let supplemental_root = navdata_path.join("Supplemental");
     let output_exists = file_name.exists();
@@ -878,7 +818,6 @@ fn write_list_file(
         permanent_path,
         &supplemental_root,
         &file_name,
-        seeded_existing_file_count,
     )?;
     let file_key = TerminalFileKey {
         icao: icao.to_string(),
@@ -918,7 +857,6 @@ fn write_list_file(
         seed_file.contents
     };
 
-    let seeded_from_existing = seed_file.copy_source.is_some();
     let copy_source = if missing_list_count == 0 {
         seed_file.copy_source
     } else {
@@ -926,11 +864,7 @@ fn write_list_file(
     };
 
     if output_exists && missing_list_count == 0 && missing_detail_sections.is_empty() {
-        return Ok(PendingTerminalBuild::Skip {
-            seeded_from_existing,
-            missing_list: false,
-            missing_detail: false,
-        });
+        return Ok(PendingTerminalBuild::Skip);
     }
 
     Ok(PendingTerminalBuild::Pending(PendingTerminalFile {
@@ -938,8 +872,6 @@ fn write_list_file(
         path: file_name,
         base_contents,
         copy_source,
-        seeded_from_existing,
-        missing_list_count,
         missing_detail_sections,
         must_write: missing_list_count > 0 || !output_exists,
     }))
@@ -947,11 +879,11 @@ fn write_list_file(
 
 fn terminal_output_path(icao: &str, proc_code: &str, navdata_path: &Path) -> Option<PathBuf> {
     match proc_code {
-        "2" => Some(navdata_path.join("Supplemental").join("SID").join(format!("{icao}.sid"))),
-        "1" => Some(navdata_path.join("Supplemental").join("STAR").join(format!("{icao}.star"))),
-        "3" => Some(navdata_path.join("Supplemental").join("STAR").join(format!("{icao}.app"))),
-        "6" => Some(navdata_path.join("Supplemental").join("SID").join(format!("{icao}.sidtrs"))),
-        "A" => Some(navdata_path.join("Supplemental").join("STAR").join(format!("{icao}.apptrs"))),
+        "2" => Some(navdata_path.join("Supplemental").join("Sid").join(format!("{icao}.sid"))),
+        "1" => Some(navdata_path.join("Supplemental").join("Star").join(format!("{icao}.star"))),
+        "3" => Some(navdata_path.join("Supplemental").join("Star").join(format!("{icao}.app"))),
+        "6" => Some(navdata_path.join("Supplemental").join("Sid").join(format!("{icao}.sidtrs"))),
+        "A" => Some(navdata_path.join("Supplemental").join("Star").join(format!("{icao}.apptrs"))),
         _ => None,
     }
 }
@@ -960,7 +892,6 @@ fn load_seed_terminal_file_contents(
     permanent_path: &Path,
     supplemental_root: &Path,
     file_path: &Path,
-    seeded_existing_file_count: &mut usize,
 ) -> Result<SeedTerminalFileContents> {
     if file_path.exists() {
         return Ok(SeedTerminalFileContents {
@@ -973,7 +904,7 @@ fn load_seed_terminal_file_contents(
     let relative = file_path
         .strip_prefix(supplemental_root)
         .with_context(|| format!("无法计算相对路径: {}", file_path.display()))?;
-    let source_path = permanent_path.join(relative);
+    let source_path = resolve_seed_source_path(permanent_path, relative);
     if !source_path.exists() {
         return Ok(SeedTerminalFileContents {
             contents: String::new(),
@@ -981,12 +912,36 @@ fn load_seed_terminal_file_contents(
         });
     }
 
-    *seeded_existing_file_count += 1;
     Ok(SeedTerminalFileContents {
         contents: fs::read_to_string(&source_path)
             .with_context(|| format!("无法读取 {}", source_path.display()))?,
         copy_source: Some(source_path),
     })
+}
+
+fn resolve_seed_source_path(permanent_path: &Path, relative: &Path) -> PathBuf {
+    let direct_path = permanent_path.join(relative);
+    if direct_path.exists() {
+        return direct_path;
+    }
+
+    let mut normalized = PathBuf::new();
+    for (index, component) in relative.components().enumerate() {
+        let part = component.as_os_str().to_string_lossy();
+        let adjusted = if index == 0 {
+            match part.as_ref() {
+                "Sid" => "SID",
+                "Star" => "STAR",
+                "Supp" => "SUPP",
+                _ => part.as_ref(),
+            }
+        } else {
+            part.as_ref()
+        };
+        normalized.push(adjusted);
+    }
+
+    permanent_path.join(normalized)
 }
 
 struct ParsedTerminalFile {
@@ -1002,7 +957,7 @@ struct SeedTerminalFileContents {
 fn write_terminal_file(
     file_state: PendingTerminalFile,
     merged_rows_by_file: &HashMap<TerminalFileKey, IndexedTerminalFileRows<'_>>,
-) -> Result<TerminalWriteOutcome> {
+) -> Result<()> {
     let generated_sections = generate_missing_leg_sections(
         &file_state.file_key,
         &file_state.missing_detail_sections,
@@ -1010,9 +965,7 @@ fn write_terminal_file(
     );
 
     if generated_sections.is_empty() && !file_state.must_write {
-        return Ok(TerminalWriteOutcome {
-            action: TerminalWriteAction::Skipped,
-        });
+        return Ok(());
     }
 
     if generated_sections.is_empty() {
@@ -1020,11 +973,10 @@ fn write_terminal_file(
             if let Some(parent) = file_state.path.parent() {
                 fs::create_dir_all(parent)?;
             }
-            fs::copy(copy_source, &file_state.path)
-                .with_context(|| format!("无法复制 {} 到 {}", copy_source.display(), file_state.path.display()))?;
-            return Ok(TerminalWriteOutcome {
-                action: TerminalWriteAction::Copied,
-            });
+            let source_contents = fs::read_to_string(copy_source)
+                .with_context(|| format!("无法读取 {}", copy_source.display()))?;
+            crate::common::write_text_file(&file_state.path, &source_contents)?;
+            return Ok(());
         }
     }
 
@@ -1044,10 +996,8 @@ fn write_terminal_file(
     if let Some(parent) = file_state.path.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::write(file_state.path, output)?;
-    Ok(TerminalWriteOutcome {
-        action: TerminalWriteAction::Rewritten,
-    })
+    crate::common::write_text_file(&file_state.path, &output)?;
+    Ok(())
 }
 
 fn parse_terminal_file_contents(file_path: &Path, contents: &str) -> ParsedTerminalFile {
@@ -1294,15 +1244,6 @@ fn collect_missing_detail_sections(
         missing_sections.push(section_index);
     }
     missing_sections
-}
-
-fn record_seed_breakdown(breakdown: &mut SeedReuseBreakdown, missing_list: bool, missing_detail: bool) {
-    match (missing_list, missing_detail) {
-        (true, true) => breakdown.missing_both += 1,
-        (true, false) => breakdown.missing_list_only += 1,
-        (false, true) => breakdown.missing_detail_only += 1,
-        (false, false) => breakdown.complete += 1,
-    }
 }
 
 fn insert_lookup_value(grouped: &mut HashMap<String, HashSet<String>>, left: &str, right: &str) {

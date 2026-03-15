@@ -87,8 +87,7 @@ pub fn update_layout_json(layout_json_path: &Path) -> Result<()> {
         content: content_entries,
     };
     let layout_json = serde_json::to_string_pretty(&layout).context("无法序列化 layout.json")?;
-    fs::write(layout_json_path, normalize_lf(&layout_json))
-        .with_context(|| format!("无法写入 {}", layout_json_path.display()))?;
+    crate::common::write_text_file(layout_json_path, &layout_json)?;
 
     total_package_size += fs::metadata(layout_json_path)
         .with_context(|| format!("无法读取 {}", layout_json_path.display()))?
@@ -115,8 +114,7 @@ fn update_manifest_json(manifest_path: &Path, total_package_size: u64) -> Result
                 Value::String(format!("{total_package_size:020}")),
             );
             let manifest_json = serialize_manifest(object)?;
-            fs::write(manifest_path, to_crlf(&manifest_json))
-                .with_context(|| format!("无法写入 {}", manifest_path.display()))?;
+            crate::common::write_text_file(manifest_path, &manifest_json)?;
         }
     }
 
@@ -162,14 +160,6 @@ fn system_time_to_filetime(time: SystemTime) -> u64 {
     };
     (duration.as_secs() + WINDOWS_EPOCH_OFFSET_SECS) * WINDOWS_TICK
         + u64::from(duration.subsec_nanos() / 100)
-}
-
-fn normalize_lf(input: &str) -> String {
-    input.replace("\r\n", "\n")
-}
-
-fn to_crlf(input: &str) -> String {
-    input.replace("\r\n", "\n").replace('\n', "\r\n")
 }
 
 #[cfg(test)]

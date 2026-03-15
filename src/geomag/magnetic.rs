@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use anyhow::{Context, Result};
@@ -57,9 +57,4 @@ fn ensure_model_file() -> Result<&'static PathBuf> {
 fn current_decimal_year() -> f64 {
     let now = Local::now();
     now.year() as f64 + ((now.month() as f64 - 1.0) / 12.0) + (now.day() as f64 / 365.0)
-}
-
-#[allow(dead_code)]
-fn model_file_path() -> Option<&'static Path> {
-    MODEL_PATH.get().map(PathBuf::as_path)
 }

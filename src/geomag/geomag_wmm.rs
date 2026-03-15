@@ -75,8 +75,6 @@ impl std::fmt::Display for Error {
 
 pub struct MagneticModel {
     from_year: f64,
-    #[allow(dead_code)]
-    until_year: f64,
     g: [[f64; 13]; 13],
     h: [[f64; 13]; 13],
     g_sv: [[f64; 13]; 13],
@@ -222,8 +220,6 @@ pub fn initialise_magnetic_model(path: &str) -> MagneticModel {
         .parse::<f64>()
         .expect("Error parsing model file!");
 
-    let until_year = from_year + WMM_VALIDITY_RANGE;
-
     let mut g = [[0.0; 13]; 13];
     let mut h = [[0.0; 13]; 13];
     let mut g_sv = [[0.0; 13]; 13];
@@ -269,7 +265,6 @@ pub fn initialise_magnetic_model(path: &str) -> MagneticModel {
 
     MagneticModel {
         from_year,
-        until_year,
         g,
         h,
         g_sv,

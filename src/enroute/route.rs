@@ -141,8 +141,8 @@ pub fn write_prepared_wpnavrte(
 ) -> Result<PathBuf> {
     let output_folder = navdata_path.join("Supplemental");
     fs::create_dir_all(&output_folder)?;
-    let output_file = output_folder.join("wpnavrte.txt");
-    fs::write(&output_file, &prepared.contents)?;
+    let output_file = output_folder.join("WPNAVRTE.txt");
+    crate::common::write_text_file(&output_file, &prepared.contents)?;
     Ok(output_file)
 }
 
@@ -599,12 +599,12 @@ fn save_route_dict(file_path: &Path, dict: &BTreeMap<String, Vec<RouteLine>>) ->
             write_route_line(&mut output, route_ident, segment);
         }
     }
-    fs::write(file_path, output)?;
+    crate::common::write_text_file(file_path, &output)?;
     Ok(())
 }
 
 fn save_sample_to_file(file_path: &Path) -> Result<()> {
     let sample_text = ";Supplemental Navaid Database (Option)\n;;\n;Data format is same as P3D_root\\iFly\\737MAX\\navdata\\\n;;\n;If any route in this file have same identifier as in\n;Main Navaid Database, FMC will delete route data in\n;the Main Navaid Database\n;;\n;This is a sample file\n;-------------------------------------------------------------\nTEST 001 TEST1 33.114350 139.788483\nTEST 002 TEST2 33.193211 138.972397\nTEST 003 TEST3 33.447742 135.794495\n";
-    fs::write(file_path, sample_text)?;
+    crate::common::write_text_file(file_path, sample_text)?;
     Ok(())
 }
