@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use geographiclib_rs::{Geodesic, InverseGeodesic};
+use num_traits::ToPrimitive;
 use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::common::{opt_string_from_f64, row_opt_f64, row_opt_i64, row_opt_string, row_string, trimmed_float};
@@ -181,7 +182,7 @@ pub fn prepare(
 ) -> Result<PreparedTerminalData> {
     let merged_data = generate_merged_data(conn, start_terminal_id, end_terminal_id)?;
     let list_rows = build_terminal_list_rows(conn, &merged_data, start_terminal_id, end_terminal_id)?;
-    let revision = get_revision_code_from_config()?;
+    let revision = get_revision_code_from_config();
     Ok(PreparedTerminalData {
         merged_data,
         list_rows,
@@ -264,8 +265,8 @@ fn generate_merged_data(
 
     let waypoints = load_all_waypoints(conn)?;
 
-    let navaids = load_navaids(conn, &nav_ids)?;
-    let navaid_by_id: HashMap<i64, Navaid> = navaids.into_iter().collect();
+    let loaded_navaids = load_navaids(conn, &nav_ids)?;
+    let navaid_by_id: HashMap<i64, Navaid> = loaded_navaids.into_iter().collect();
     let runways_by_airport_and_ident: HashMap<(i64, String), Runway> = runways
         .into_iter()
         .map(|runway| ((runway.airport_id, runway.ident.clone()), runway))
@@ -333,7 +334,7 @@ fn generate_merged_data(
             center_lon: center.map(|value| value.longitude),
         });
     }
-    apply_map_logic(&mut merged_rows, &waypoints, &runways_by_airport_and_ident)?;
+    apply_map_logic(&mut merged_rows, &waypoints, &runways_by_airport_and_ident);
 
     apply_terminal_post_processing(&mut merged_rows);
     Ok(merged_rows)
@@ -471,7 +472,7 @@ fn apply_map_logic(
     merged_rows: &mut [MergedLeg],
     waypoints: &HashMap<i64, Waypoint>,
     runways_by_airport_and_ident: &HashMap<(i64, String), Runway>,
-) -> Result<()> {
+) {
     let geodesic = Geodesic::wgs84();
     let waypoint_by_coordinates = build_waypoint_coordinate_lookup(waypoints);
     for index in 0..merged_rows.len() {
@@ -547,21 +548,18 @@ fn apply_map_logic(
         row.altitude = Some(chosen_altitude.round().to_string());
     }
 
-    for row in merged_rows.iter_mut() {
+    for row in &mut *merged_rows {
         if let Some(name) = row.name.as_deref() {
             row.name = Some(match name {
                 "ZJ400" => "RW15".to_string(),
                 "HJ600" => "RW06".to_string(),
                 "QT800" => "RW27".to_string(),
                 "RQ610" => "RW04".to_string(),
-                "SC600" => "RW33".to_string(),
-                "TK800" => "RW33".to_string(),
+                "SC600" | "TK800" => "RW33".to_string(),
                 _ => name.to_string(),
             });
         }
     }
-
-    Ok(())
 }
 
 fn build_waypoint_coordinate_lookup(
@@ -590,7 +588,7 @@ fn parse_altitude_value(value: &str) -> Option<f64> {
     let mut parsed = 0f64;
     let mut has_digit = false;
     for digit in value.bytes().filter(u8::is_ascii_digit) {
-        parsed = parsed * 10.0 + f64::from(digit - b'0');
+        parsed = parsed.mul_add(10.0, f64::from(digit - b'0'));
         has_digit = true;
     }
     has_digit.then_some(parsed)
@@ -634,7 +632,7 @@ fn apply_terminal_post_processing(merged_rows: &mut Vec<MergedLeg>) {
         }
     }
 
-    for row in expanded_rows.iter_mut() {
+    for row in &mut expanded_rows {
         if row.leg.as_deref() == Some("IF") && row.name.is_none() {
             if let Some(rwy) = row.rwy.as_ref() {
                 row.name = Some(format!("RW{}", normalize_runway_value(Some(rwy.as_ref()))));
@@ -1100,7 +1098,7 @@ fn build_speed_limit(ex: Option<&TerminalLegExRow>) -> Option<String> {
 fn build_cross_this_point(ex: Option<&TerminalLegExRow>) -> Option<String> {
     match ex.and_then(|value| value.is_fly_over) {
         Some(0) => None,
-        Some(value) => Some(format!("{:.1}", value as f64)),
+        Some(value) => Some(value.to_f64().map_or_else(|| value.to_string(), |raw| format!("{raw:.1}"))),
         None => Some("nan".to_string()),
     }
 }
@@ -1270,10 +1268,10 @@ fn append_leg_field(section: &mut String, key: &str, value: Option<&str>) {
     }
 }
 
-fn get_revision_code_from_config() -> Result<String> {
+fn get_revision_code_from_config() -> String {
     let db_path = PathBuf::from(r"C:\ProgramData\Fenix\Navdata\nd.db3");
     if !db_path.exists() {
-        return Ok("None".to_string());
+        return "None".to_string();
     }
 
     let row = (|| -> Result<Option<String>> {
@@ -1289,9 +1287,9 @@ fn get_revision_code_from_config() -> Result<String> {
     })();
 
     match row {
-        Ok(Some(value)) => Ok(value.trim().to_string()),
-        Ok(None) => Ok("2601".to_string()),
-        Err(_) => Ok("None".to_string()),
+        Ok(Some(value)) => value.trim().to_string(),
+        Ok(None) => "2601".to_string(),
+        Err(_) => "None".to_string(),
     }
 }
 
@@ -1301,20 +1299,22 @@ fn join_i64_values(values: &[i64]) -> String {
 
 fn normalize_runway_value(raw_value: Option<&str>) -> String {
     let Some(raw_value) = raw_value else {
-        return "".to_string();
+        return String::new();
     };
     let raw_value = raw_value.trim().to_uppercase();
     if raw_value.is_empty() {
         return raw_value;
     }
     if let Ok(value) = raw_value.parse::<f64>() {
-        return format!("{:02}", value as i64);
+        if let Some(rounded) = value.round().to_i64() {
+            return format!("{rounded:02}");
+        }
     }
-    let digits: String = raw_value.chars().filter(|c| c.is_ascii_digit()).collect();
+    let digits: String = raw_value.chars().filter(char::is_ascii_digit).collect();
     if digits.is_empty() {
         raw_value
     } else {
-        format!("{:0>2}", digits)
+        format!("{digits:0>2}")
     }
 }
 
@@ -1326,7 +1326,7 @@ fn zfill_runway_value(raw_value: Option<&str>) -> String {
     if raw_value.len() >= 2 {
         raw_value
     } else {
-        format!("{:0>2}", raw_value)
+        format!("{raw_value:0>2}")
     }
 }
 

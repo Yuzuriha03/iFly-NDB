@@ -10,14 +10,14 @@ use regex::Regex;
 use rusqlite::{params_from_iter, Connection};
 
 #[derive(Clone, Debug)]
-pub(crate) struct RouteLine {
+pub struct RouteLine {
     segment_number: usize,
     fix_ident: String,
     latitude: String,
     longitude: String,
 }
 
-pub(crate) struct CheckedRouteData {
+pub struct CheckedRouteData {
     existing_routes: BTreeMap<String, Vec<RouteLine>>,
     checked_routes: BTreeMap<String, Vec<RouteLine>>,
 }
@@ -43,7 +43,7 @@ struct GeneratedAirwaySegment {
     longitude: f64,
 }
 
-pub(crate) struct PreparedRouteData {
+pub struct PreparedRouteData {
     contents: String,
 }
 
@@ -340,10 +340,10 @@ fn resolve_cached_coordinates(
     let mut min_distance_nm = f64::MAX;
     for (lat, lon) in candidates {
         let distance_m: f64 = geodesic.inverse(latitude, longitude, *lat, *lon);
-        let distance_nm = distance_m / 1852.0;
-        if distance_nm <= 5.0 && distance_nm < min_distance_nm {
+        let distance_nautical_miles = distance_m / 1852.0;
+        if distance_nautical_miles <= 5.0 && distance_nautical_miles < min_distance_nm {
             best_match = Some((*lat, *lon));
-            min_distance_nm = distance_nm;
+            min_distance_nm = distance_nautical_miles;
         }
     }
 

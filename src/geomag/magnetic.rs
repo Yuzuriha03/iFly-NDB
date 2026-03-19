@@ -12,7 +12,7 @@ const WMM_HIGH_RESOLUTION: &str = include_str!("magcof/WMMHR.COF");
 static MODEL: OnceLock<MagneticModel> = OnceLock::new();
 static MODEL_PATH: OnceLock<PathBuf> = OnceLock::new();
 
-pub(crate) fn batch_get_magnetic_variations(coordinates: &[(f64, f64)]) -> Result<Vec<f64>> {
+pub fn batch_get_magnetic_variations(coordinates: &[(f64, f64)]) -> Result<Vec<f64>> {
     let model = shared_model()?;
     let decimal_year = current_decimal_year();
     coordinates
@@ -56,5 +56,5 @@ fn ensure_model_file() -> Result<&'static PathBuf> {
 
 fn current_decimal_year() -> f64 {
     let now = Local::now();
-    now.year() as f64 + ((now.month() as f64 - 1.0) / 12.0) + (now.day() as f64 / 365.0)
+    f64::from(now.year()) + ((f64::from(now.month()) - 1.0) / 12.0) + (f64::from(now.day()) / 365.0)
 }

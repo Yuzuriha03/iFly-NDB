@@ -6,6 +6,7 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result};
+use num_traits::ToPrimitive;
 use rusqlite::{params, Connection};
 
 use crate::common::{row_opt_f64, row_opt_i64, row_opt_string, row_string};
@@ -219,20 +220,22 @@ fn build_wpnavapt_data(conn: &Connection, start_airport_id: i64) -> Result<Optio
 }
 
 fn append_wpnavapt_row(buffer: &mut String, task: &RunwayTask, declination: f64) {
-    let magnetic_heading = (task.true_heading - declination).round() as i64;
+    let magnetic_heading = (task.true_heading - declination).round().to_i64().unwrap_or_default();
+    let runway_length = task.length.round().to_i64().unwrap_or_default();
+    let runway_elevation = task.elevation.round().to_i64().unwrap_or_default();
     let _ = writeln!(
         buffer,
         "{:<24}{}{: <3}{:05}{:03}{:>10.6}{:>11.6}{}{:03}{:05}",
         task.airport_name,
         task.icao,
         task.ident,
-        task.length.round() as i64,
+        runway_length,
         magnetic_heading,
         task.latitude,
         task.longitude,
         task.frequency,
         magnetic_heading,
-        task.elevation.round() as i64,
+        runway_elevation,
     );
 }
 
@@ -250,20 +253,19 @@ fn load_ils_frequency_cache(conn: &Connection) -> Result<HashMap<i64, String>> {
         if cache.contains_key(&runway_id) {
             continue;
         }
-        let frequency = freq_value
-            .map(format_ils_frequency)
-            .unwrap_or_else(|| "000.00".to_string());
+        let frequency = freq_value.map_or_else(|| "000.00".to_string(), format_ils_frequency);
         cache.insert(runway_id, frequency);
     }
     Ok(cache)
 }
 
 fn format_ils_frequency(freq: i64) -> String {
-    let mut frequency = format!("{:X}", freq).parse::<f64>().unwrap_or(0.0);
-    while frequency >= 1000.0 {
-        frequency /= 10.0;
+    let mut frequency = format!("{freq:X}").parse::<i64>().unwrap_or_default();
+    while frequency >= 1000 {
+        frequency /= 10;
     }
-    format!("{frequency:.2}")
+    let as_f64 = frequency.to_f64().unwrap_or_default();
+    format!("{as_f64:.2}")
 }
 
 fn build_wpnavaid_data(conn: &Connection) -> Result<Option<String>> {
@@ -332,7 +334,7 @@ fn build_wpnavfix_data(conn: &Connection) -> Result<Option<String>> {
     let mut body = String::new();
     for row in rows {
         let (ident, latitude, longitude) = row?;
-        let _ = writeln!(body, "{:<24}{:<5}{:>10.6}{:>11.6}", ident, ident, latitude, longitude);
+        let _ = writeln!(body, "{ident:<24}{ident:<5}{latitude:>10.6}{longitude:>11.6}");
     }
     Ok(Some(body))
 }

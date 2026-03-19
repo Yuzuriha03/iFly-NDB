@@ -7,6 +7,7 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
+use num_traits::ToPrimitive;
 use rusqlite::{types::ValueRef, Connection, Row};
 
 #[derive(Debug, Clone)]
@@ -171,8 +172,7 @@ pub fn derive_navdata_path(route_file: &Path) -> PathBuf {
     route_file
         .parent()
         .and_then(Path::parent)
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| route_file.to_path_buf())
+    .map_or_else(|| route_file.to_path_buf(), Path::to_path_buf)
 }
 
 pub fn resolve_terminal_range(
@@ -203,14 +203,13 @@ pub fn resolve_terminal_range(
     }
 }
 
-pub fn delete_data_navdatasupplemental(navdata_path: &Path) -> Result<()> {
+pub fn delete_data_navdatasupplemental(navdata_path: &Path) {
     if let Some(parent) = navdata_path.parent() {
         let target = parent.join("navdataSupplemental");
         if target.exists() {
             let _ = fs::remove_dir_all(&target);
         }
     }
-    Ok(())
 }
 
 pub fn update_layout_json(navdata_path: &Path) -> Result<()> {
@@ -261,22 +260,20 @@ pub fn row_string(row: &Row<'_>, idx: usize) -> rusqlite::Result<String> {
 pub fn row_opt_f64(row: &Row<'_>, idx: usize) -> rusqlite::Result<Option<f64>> {
     let value = row.get_ref(idx)?;
     Ok(match value {
-        ValueRef::Null => None,
         ValueRef::Real(value) => Some(value),
-        ValueRef::Integer(value) => Some(value as f64),
+        ValueRef::Integer(value) => value.to_f64(),
         ValueRef::Text(value) => std::str::from_utf8(value).ok().and_then(|text| text.parse().ok()),
-        ValueRef::Blob(_) => None,
+        ValueRef::Null | ValueRef::Blob(_) => None,
     })
 }
 
 pub fn row_opt_i64(row: &Row<'_>, idx: usize) -> rusqlite::Result<Option<i64>> {
     let value = row.get_ref(idx)?;
     Ok(match value {
-        ValueRef::Null => None,
         ValueRef::Integer(value) => Some(value),
-        ValueRef::Real(value) => Some(value.round() as i64),
+        ValueRef::Real(value) => value.round().to_i64(),
         ValueRef::Text(value) => std::str::from_utf8(value).ok().and_then(|text| text.parse().ok()),
-        ValueRef::Blob(_) => None,
+        ValueRef::Null | ValueRef::Blob(_) => None,
     })
 }
 
@@ -294,11 +291,10 @@ pub fn trimmed_float(value: f64) -> String {
 
 fn value_ref_to_string(value: ValueRef<'_>) -> Option<String> {
     match value {
-        ValueRef::Null => None,
         ValueRef::Integer(value) => Some(value.to_string()),
         ValueRef::Real(value) => Some(trimmed_float(value)),
         ValueRef::Text(value) => Some(String::from_utf8_lossy(value).to_string()),
-        ValueRef::Blob(_) => None,
+        ValueRef::Null | ValueRef::Blob(_) => None,
     }
 }
 

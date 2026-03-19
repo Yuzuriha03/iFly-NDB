@@ -44,29 +44,29 @@ fn main() {
 fn run() -> Result<()> {
     let cli = Cli::parse();
 
-    let db_path = resolve_db_path(cli.db_path.clone())?;
+    let db_path = resolve_db_path(cli.db_path)?;
     let db_connection_task = spawn_db_connection_task(db_path.clone());
-    let navdata_detect_task = spawn_navdata_detect_task(cli.route_file.clone(), cli.navdata_path.clone());
+    let navdata_detect_task = spawn_navdata_detect_task(cli.route_file.as_ref(), cli.navdata_path.as_ref());
 
-    let csv_path = match cli.csv_path.clone() {
+    let csv_path = match cli.csv_path {
         Some(path) => path,
         None => common::prompt_path("请输入NAIP RTE_SEG.csv文件路径：", "RTE_SEG.csv")?,
     };
-    let enroute_prepare_task = spawn_enroute_prepare_task(db_path.clone(), csv_path.clone());
+    let enroute_prepare_task = spawn_enroute_prepare_task(db_path.clone(), csv_path);
 
     let (start_terminal_id, end_terminal_id) = common::resolve_terminal_range(
         cli.start_terminal_id,
         cli.end_terminal_id,
     )?;
     let terminal_prepare_task = spawn_terminal_prepare_task(
-        db_path.clone(),
+        db_path,
         start_terminal_id,
         end_terminal_id,
     );
 
     let navdata_targets = resolve_navdata_targets(
-        cli.route_file,
-        cli.navdata_path,
+        cli.route_file.as_ref(),
+        cli.navdata_path.as_ref(),
         navdata_detect_task,
     )?;
     let _validated_conn = join_worker(db_connection_task, "数据库连接与校验任务")??;
@@ -84,7 +84,7 @@ fn run() -> Result<()> {
     }
 
     if thread_count <= 1 {
-        for target in navdata_targets {
+        for target in &navdata_targets {
             process_navdata_target(
                 target,
                 prepared_enroute.as_deref(),
@@ -100,7 +100,7 @@ fn run() -> Result<()> {
 
         let results = pool.install(|| {
             navdata_targets
-                .into_par_iter()
+                .par_iter()
                 .map(|target| {
                     process_navdata_target(
                         target,
@@ -123,10 +123,10 @@ fn run() -> Result<()> {
 }
 
 fn resolve_db_path(cli_db_path: Option<PathBuf>) -> Result<PathBuf> {
-    match cli_db_path {
-        Some(path) => Ok(path),
-        None => common::prompt_path("请输入Fenix的nd.db3文件路径：", ".db3"),
-    }
+    cli_db_path.map_or_else(
+        || common::prompt_path("请输入Fenix的nd.db3文件路径：", ".db3"),
+        Ok,
+    )
 }
 
 fn spawn_db_connection_task(db_path: PathBuf) -> JoinHandle<Result<Connection>> {
@@ -146,8 +146,8 @@ fn spawn_enroute_prepare_task(
 }
 
 fn spawn_navdata_detect_task(
-    route_file: Option<PathBuf>,
-    navdata_path: Option<PathBuf>,
+    route_file: Option<&PathBuf>,
+    navdata_path: Option<&PathBuf>,
 ) -> Option<JoinHandle<Result<Vec<common::NavdataTarget>>>> {
     if route_file.is_some() || navdata_path.is_some() {
         return None;
@@ -165,22 +165,18 @@ fn spawn_terminal_prepare_task(
         let conn = common::open_fenix_connection(&db_path)
             .with_context(|| format!("Terminals 预加载时无法连接数据库: {}", db_path.display()))?;
         terminal::prepare(&conn, start_terminal_id, end_terminal_id).with_context(|| {
-            format!(
-                "Terminals 预加载失败: TerminalID {}-{}",
-                start_terminal_id,
-                end_terminal_id
-            )
+            format!("Terminals 预加载失败: TerminalID {start_terminal_id}-{end_terminal_id}")
         })
     })
 }
 
 fn resolve_navdata_targets(
-    route_file: Option<PathBuf>,
-    navdata_path: Option<PathBuf>,
+    route_file: Option<&PathBuf>,
+    navdata_path: Option<&PathBuf>,
     navdata_detect_task: Option<JoinHandle<Result<Vec<common::NavdataTarget>>>>,
 ) -> Result<Vec<common::NavdataTarget>> {
     if route_file.is_some() || navdata_path.is_some() {
-        return common::resolve_navdata_paths(route_file, navdata_path);
+        return common::resolve_navdata_paths(route_file.cloned(), navdata_path.cloned());
     }
 
     match navdata_detect_task {
@@ -204,20 +200,19 @@ fn join_worker<T>(handle: JoinHandle<Result<T>>, task_name: &str) -> Result<Resu
 fn panic_payload_to_string(payload: Box<dyn std::any::Any + Send + 'static>) -> String {
     match payload.downcast::<String>() {
         Ok(message) => *message,
-        Err(payload) => match payload.downcast::<&'static str>() {
-            Ok(message) => (*message).to_string(),
-            Err(_) => "unknown panic payload".to_string(),
-        },
+        Err(payload) => payload
+            .downcast::<&'static str>()
+            .map_or_else(|_| "unknown panic payload".to_string(), |message| (*message).to_string()),
     }
 }
 
 fn process_navdata_target(
-    target: common::NavdataTarget,
+    target: &common::NavdataTarget,
     prepared_enroute: Option<&enroute::PreparedEnrouteData>,
     prepared_terminals: &terminal::PreparedTerminalData,
     skip_layout_update: bool,
 ) -> Result<()> {
-    let target_label = target_label(&target);
+    let target_label = target.source_label.as_str();
 
     if let Some(prepared_enroute) = prepared_enroute {
         enroute::write_prepared(prepared_enroute, &target.route_file, &target.navdata_path)
@@ -229,7 +224,7 @@ fn process_navdata_target(
         .with_context(|| format!("处理 Terminal 失败: {}", target.navdata_path.display()))?;
     println!("[{target_label}] Terminal数据转换完毕");
 
-    common::delete_data_navdatasupplemental(&target.navdata_path)?;
+    common::delete_data_navdatasupplemental(&target.navdata_path);
     if !skip_layout_update && !target_label.starts_with("MSFS2024") {
         common::update_layout_json(&target.navdata_path)?;
     }
@@ -242,11 +237,7 @@ fn directory_worker_count(target_count: usize) -> usize {
     }
 
     let available = thread::available_parallelism()
-        .map(|parallelism| parallelism.get())
+        .map(std::num::NonZero::get)
         .unwrap_or(1);
     available.min(target_count).clamp(1, 4)
-}
-
-fn target_label(target: &common::NavdataTarget) -> &str {
-    target.source_label.as_str()
 }

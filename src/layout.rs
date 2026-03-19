@@ -154,10 +154,9 @@ fn is_ignored_dir(path: &Path, package_root: &Path) -> bool {
 }
 
 fn system_time_to_filetime(time: SystemTime) -> u64 {
-    let duration = match time.duration_since(UNIX_EPOCH) {
-        Ok(duration) => duration,
-        Err(_) => Duration::ZERO,
-    };
+    let duration = time
+        .duration_since(UNIX_EPOCH)
+        .map_or(Duration::ZERO, |duration| duration);
     (duration.as_secs() + WINDOWS_EPOCH_OFFSET_SECS) * WINDOWS_TICK
         + u64::from(duration.subsec_nanos() / 100)
 }
