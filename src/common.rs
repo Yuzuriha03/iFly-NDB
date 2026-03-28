@@ -178,28 +178,12 @@ pub fn derive_navdata_path(route_file: &Path) -> PathBuf {
 pub fn resolve_terminal_range(
     start_terminal_id: Option<i64>,
     end_terminal_id: Option<i64>,
-) -> Result<(i64, i64)> {
+) -> Result<Option<i64>> {
     match (start_terminal_id, end_terminal_id) {
-        (Some(start), Some(end)) => Ok((start, end)),
-        (Some(start), None) => Ok((start, 99_999_999)),
+        (Some(start), Some(_end)) => Ok(Some(start)),
+        (Some(start), None) => Ok(Some(start)),
         (None, Some(_)) => bail!("提供结束 TerminalID 时也需要提供起始 TerminalID"),
-        (None, None) => loop {
-            let raw = prompt_line("请输入要转换终端程序集的起始TerminalID和结束TerminalID，用空格分隔二者：")?;
-            let parts: Vec<&str> = raw.split_whitespace().collect();
-            match parts.as_slice() {
-                [start] if start.chars().all(|c| c.is_ascii_digit()) => {
-                    println!("终止ID未输入，将自动转换到数据库中最后一个终端程序");
-                    return Ok((start.parse()?, 99_999_999));
-                }
-                [start, end]
-                    if start.chars().all(|c| c.is_ascii_digit())
-                        && end.chars().all(|c| c.is_ascii_digit()) =>
-                {
-                    return Ok((start.parse()?, end.parse()?));
-                }
-                _ => eprintln!("请输入有效的数字，并用空格分隔！"),
-            }
-        },
+        (None, None) => Ok(None),
     }
 }
 

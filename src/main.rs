@@ -54,15 +54,11 @@ fn run() -> Result<()> {
     };
     let enroute_prepare_task = spawn_enroute_prepare_task(db_path.clone(), csv_path);
 
-    let (start_terminal_id, end_terminal_id) = common::resolve_terminal_range(
+    let start_terminal_id = common::resolve_terminal_range(
         cli.start_terminal_id,
         cli.end_terminal_id,
     )?;
-    let terminal_prepare_task = spawn_terminal_prepare_task(
-        db_path,
-        start_terminal_id,
-        end_terminal_id,
-    );
+    let terminal_prepare_task = spawn_terminal_prepare_task(db_path, start_terminal_id);
 
     let navdata_targets = resolve_navdata_targets(
         cli.route_file.as_ref(),
@@ -158,14 +154,13 @@ fn spawn_navdata_detect_task(
 
 fn spawn_terminal_prepare_task(
     db_path: PathBuf,
-    start_terminal_id: i64,
-    end_terminal_id: i64,
+    start_terminal_id: Option<i64>,
 ) -> JoinHandle<Result<terminal::PreparedTerminalData>> {
     thread::spawn(move || {
         let conn = common::open_fenix_connection(&db_path)
             .with_context(|| format!("Terminals 预加载时无法连接数据库: {}", db_path.display()))?;
-        terminal::prepare(&conn, start_terminal_id, end_terminal_id).with_context(|| {
-            format!("Terminals 预加载失败: TerminalID {start_terminal_id}-{end_terminal_id}")
+        terminal::prepare(&conn, start_terminal_id).with_context(|| {
+            format!("Terminals 预加载失败: start_terminal_id={start_terminal_id:?}")
         })
     })
 }

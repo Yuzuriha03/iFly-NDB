@@ -3,6 +3,11 @@ name = "ifly_ndb_converter"
 version = "0.1.0"
 edition = "2021"
 build = "build.rs"
+description = "Convert navdata from Fenix format to iFly supplemental format"
+license = "MIT"
+repository = "https://github.com/your-org/your-repo"
+keywords = ["navdata", "ifly", "converter", "terminal"]
+categories = ["command-line-utilities"]
 
 [dependencies]
 anyhow = "1"

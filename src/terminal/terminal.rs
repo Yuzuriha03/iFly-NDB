@@ -177,9 +177,9 @@ pub struct PreparedTerminalData {
 
 pub fn prepare(
     conn: &Connection,
-    start_terminal_id: i64,
-    end_terminal_id: i64,
+    start_terminal_id: Option<i64>,
 ) -> Result<PreparedTerminalData> {
+    let (start_terminal_id, end_terminal_id) = resolve_terminal_range_from_db(conn, start_terminal_id)?;
     let merged_data = generate_merged_data(conn, start_terminal_id, end_terminal_id)?;
     let list_rows = build_terminal_list_rows(conn, &merged_data, start_terminal_id, end_terminal_id)?;
     let revision = get_revision_code_from_config();
@@ -188,6 +188,73 @@ pub fn prepare(
         list_rows,
         revision,
     })
+}
+
+fn prompt_terminal_range() -> Result<(i64, i64)> {
+    loop {
+        let raw = crate::common::prompt_line("请手动输入起始 TerminalID（终止不输入表示到最后一个）：")?;
+        let parts: Vec<&str> = raw.split_whitespace().collect();
+
+        match parts.as_slice() {
+            [start] if start.chars().all(|c| c.is_ascii_digit()) => {
+                let start_id = start.parse()?;
+                return Ok((start_id, 99_999_999));
+            }
+            [start, end]
+                if start.chars().all(|c| c.is_ascii_digit())
+                    && end.chars().all(|c| c.is_ascii_digit()) =>
+            {
+                let start_id = start.parse()?;
+                let end_id = end.parse()?;
+                return Ok((start_id, end_id));
+            }
+            _ => eprintln!("请输入有效的数字，并用空格分隔！"),
+        }
+    }
+}
+
+fn resolve_terminal_range_from_db(
+    conn: &Connection,
+    start_terminal_id_opt: Option<i64>,
+) -> Result<(i64, i64)> {
+    let max_id_opt: Option<i64> = conn
+        .query_row("SELECT MAX(ID) FROM Terminals", [], |row| row.get(0))
+        .optional()
+        .context("查询 Terminals 最大 ID 时发生错误")?;
+
+    let Some(max_id) = max_id_opt else {
+        eprintln!("Terminals表中没有任何记录，进入手动输入");
+        return prompt_terminal_range();
+    };
+
+    if let Some(start_id) = start_terminal_id_opt {
+        if start_id > max_id {
+            eprintln!("指定的起始ID({start_id})大于最大ID({max_id})，进入手动输入");
+            return prompt_terminal_range();
+        }
+        return Ok((start_id, max_id));
+    }
+
+    let anchor_id_opt: Option<i64> = conn
+        .query_row(
+            "SELECT ID FROM Terminals WHERE ICAO = 'ZYYJ' AND Name = 'Q09' ORDER BY ID LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .context("查询 Terminals 表时发生错误")?;
+
+    let Some(anchor_id) = anchor_id_opt else {
+        eprintln!("未找到 ICAO=ZYYJ 且 Name=Q09 的 Terminals 记录，进入手动输入");
+        return prompt_terminal_range();
+    };
+
+    if anchor_id >= max_id {
+        eprintln!("ZYYJ/Q09 记录ID({anchor_id})已是或超出最大TerminalID({max_id})，进入手动输入");
+        return prompt_terminal_range();
+    }
+
+    Ok((anchor_id + 1, max_id))
 }
 
 pub fn write_prepared(prepared: &PreparedTerminalData, navdata_path: &Path) -> Result<()> {
