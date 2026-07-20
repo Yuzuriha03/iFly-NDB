@@ -45,9 +45,7 @@ pub fn update_layout_json(layout_json_path: &Path) -> Result<()> {
         .into_iter()
         .filter_entry(|entry| !is_ignored_dir(entry.path(), package_root))
     {
-        let entry = entry.with_context(|| {
-            format!("无法遍历目录 {}", package_root.display())
-        })?;
+        let entry = entry.with_context(|| format!("无法遍历目录 {}", package_root.display()))?;
         if !entry.file_type().is_file() {
             continue;
         }
@@ -209,7 +207,10 @@ mod tests {
             .and_then(Value::as_array)
             .expect("layout content missing");
         assert_eq!(content.len(), 1);
-        assert_eq!(content[0].get("path").and_then(Value::as_str), Some("SimObjects/aircraft.cfg"));
+        assert_eq!(
+            content[0].get("path").and_then(Value::as_str),
+            Some("SimObjects/aircraft.cfg")
+        );
 
         let manifest_text = fs::read_to_string(&manifest_path)?;
         assert!(manifest_text.contains("\r\n"));

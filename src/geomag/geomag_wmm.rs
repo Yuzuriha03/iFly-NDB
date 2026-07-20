@@ -77,7 +77,9 @@ pub enum Error {
 impl std::fmt::Display for Error {
     fn fmt(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
-            Self::DateOutsideOfValidityRange => write!(formatter, "Date outside of validity range!"),
+            Self::DateOutsideOfValidityRange => {
+                write!(formatter, "Date outside of validity range!")
+            }
         }
     }
 }
@@ -185,7 +187,14 @@ impl MagneticModel {
             z_dot_prime += n_plus_one * k_temp * z_dot_prime_tmp;
         }
 
-        (x_prime, y_prime, z_prime, x_dot_prime, y_dot_prime, z_dot_prime)
+        (
+            x_prime,
+            y_prime,
+            z_prime,
+            x_dot_prime,
+            y_dot_prime,
+            z_dot_prime,
+        )
     }
 
     pub fn calculate(
@@ -199,17 +208,34 @@ impl MagneticModel {
         let longitude_rad = longitude_deg.to_radians();
         let latitude_rad = latitude_deg.to_radians();
         let curvature_radius = EQUATORIAL_RADIUS
-            / f64::sqrt((ECCENTRICITY_SQUARED * latitude_rad.sin()).mul_add(-latitude_rad.sin(), 1.0));
+            / f64::sqrt(
+                (ECCENTRICITY_SQUARED * latitude_rad.sin()).mul_add(-latitude_rad.sin(), 1.0),
+            );
         let planar_radius = (curvature_radius + altitude_m) * f64::cos(latitude_rad);
-        let vertical_offset = (curvature_radius * (1.0 - ECCENTRICITY_SQUARED) + altitude_m) * f64::sin(latitude_rad);
-        let geocentric_radius = f64::sqrt(planar_radius * planar_radius + vertical_offset * vertical_offset);
+        let vertical_offset =
+            (curvature_radius * (1.0 - ECCENTRICITY_SQUARED) + altitude_m) * f64::sin(latitude_rad);
+        let geocentric_radius =
+            f64::sqrt(planar_radius * planar_radius + vertical_offset * vertical_offset);
         let geocentric_latitude = f64::asin(vertical_offset / geocentric_radius);
 
         let psn_sinphi = schmidt_semi_normalised_associated_legendre(f64::sin(geocentric_latitude));
         let (g_t, h_t) = self.build_time_adjusted_coefficients(time_delta);
         let dpsn_sinphi_dphi = Self::build_legendre_derivative(geocentric_latitude, &psn_sinphi);
-        let (mut x_prime, mut y_prime, mut z_prime, mut x_dot_prime, mut y_dot_prime, mut z_dot_prime) =
-            self.accumulate_prime_components(longitude_rad, geocentric_radius, &psn_sinphi, &dpsn_sinphi_dphi, &g_t, &h_t);
+        let (
+            mut x_prime,
+            mut y_prime,
+            mut z_prime,
+            mut x_dot_prime,
+            mut y_dot_prime,
+            mut z_dot_prime,
+        ) = self.accumulate_prime_components(
+            longitude_rad,
+            geocentric_radius,
+            &psn_sinphi,
+            &dpsn_sinphi_dphi,
+            &g_t,
+            &h_t,
+        );
 
         x_prime *= -1.0;
         y_prime *= 1.0 / f64::cos(geocentric_latitude);
@@ -222,18 +248,24 @@ impl MagneticModel {
         let x_north = x_prime.mul_add(f64::cos(delta_lat), -(z_prime * f64::sin(delta_lat)));
         let y_east = y_prime;
         let z_down = x_prime.mul_add(f64::sin(delta_lat), z_prime * f64::cos(delta_lat));
-        let x_north_dot = x_dot_prime.mul_add(f64::cos(delta_lat), -(z_dot_prime * f64::sin(delta_lat)));
+        let x_north_dot =
+            x_dot_prime.mul_add(f64::cos(delta_lat), -(z_dot_prime * f64::sin(delta_lat)));
         let y_east_dot = y_dot_prime;
-        let z_down_dot = x_dot_prime.mul_add(f64::sin(delta_lat), z_dot_prime * f64::cos(delta_lat));
+        let z_down_dot =
+            x_dot_prime.mul_add(f64::sin(delta_lat), z_dot_prime * f64::cos(delta_lat));
 
         let horizontal_intensity = f64::sqrt(x_north * x_north + y_east * y_east);
-        let total_intensity = f64::sqrt(horizontal_intensity * horizontal_intensity + z_down * z_down);
+        let total_intensity =
+            f64::sqrt(horizontal_intensity * horizontal_intensity + z_down * z_down);
         let inclination = f64::atan2(z_down, horizontal_intensity);
         let declination = f64::atan2(y_east, x_north);
         let horizontal_dot = (x_north * x_north_dot + y_east * y_east_dot) / horizontal_intensity;
-        let total_dot = (x_north * x_north_dot + y_east * y_east_dot + z_down * z_down_dot) / total_intensity;
-        let inclination_dot = (z_down_dot * horizontal_intensity - z_down * horizontal_dot) / total_intensity.powi(2);
-        let declination_dot = y_east_dot.mul_add(x_north, -(y_east * x_north_dot)) / horizontal_intensity.powi(2);
+        let total_dot =
+            (x_north * x_north_dot + y_east * y_east_dot + z_down * z_down_dot) / total_intensity;
+        let inclination_dot =
+            (z_down_dot * horizontal_intensity - z_down * horizontal_dot) / total_intensity.powi(2);
+        let declination_dot =
+            y_east_dot.mul_add(x_north, -(y_east * x_north_dot)) / horizontal_intensity.powi(2);
 
         Ok((
             x_north,
@@ -281,12 +313,36 @@ pub fn initialise_magnetic_model(path: &str) -> MagneticModel {
 
                 let mut line = line.split_whitespace();
 
-                let n_line: usize = line.next().expect("Error parsing model file!").parse().expect("Error parsing model file!");
-                let m_line: usize = line.next().expect("Error parsing model file!").parse().expect("Error parsing model file!");
-                let g_line: f64 = line.next().expect("Error parsing model file!").parse().expect("Error parsing model file!");
-                let h_line: f64 = line.next().expect("Error parsing model file!").parse().expect("Error parsing model file!");
-                let g_sv_line: f64 = line.next().expect("Error parsing model file!").parse().expect("Error parsing model file!");
-                let h_sv_line: f64 = line.next().expect("Error parsing model file!").parse().expect("Error parsing model file!");
+                let n_line: usize = line
+                    .next()
+                    .expect("Error parsing model file!")
+                    .parse()
+                    .expect("Error parsing model file!");
+                let m_line: usize = line
+                    .next()
+                    .expect("Error parsing model file!")
+                    .parse()
+                    .expect("Error parsing model file!");
+                let g_line: f64 = line
+                    .next()
+                    .expect("Error parsing model file!")
+                    .parse()
+                    .expect("Error parsing model file!");
+                let h_line: f64 = line
+                    .next()
+                    .expect("Error parsing model file!")
+                    .parse()
+                    .expect("Error parsing model file!");
+                let g_sv_line: f64 = line
+                    .next()
+                    .expect("Error parsing model file!")
+                    .parse()
+                    .expect("Error parsing model file!");
+                let h_sv_line: f64 = line
+                    .next()
+                    .expect("Error parsing model file!")
+                    .parse()
+                    .expect("Error parsing model file!");
 
                 if n_line > MAX_DEGREE {
                     break;

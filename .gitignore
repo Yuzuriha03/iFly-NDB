@@ -1,14 +1,13 @@
 /.git
 /.vscode
+/.idea/
 /Command.txt
 /Fenix2iFlyNDBConverter.exe
-/icon.ico
 /dist
 PySrc/Terminal/__pycache__
 PySrc/Terminal/__pycache__
 PySrc/Enroute/__pycache__
 PySrc/Enroute/Route/__pycache__
-Cargo.lock
 /target
 *.ps1
 /debug

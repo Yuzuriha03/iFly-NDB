@@ -9,7 +9,9 @@ use geographiclib_rs::{Geodesic, InverseGeodesic};
 use num_traits::ToPrimitive;
 use rusqlite::{params, Connection, OptionalExtension};
 
-use crate::common::{opt_string_from_f64, row_opt_f64, row_opt_i64, row_opt_string, row_string, trimmed_float};
+use crate::common::{
+    opt_string_from_f64, row_opt_f64, row_opt_i64, row_opt_string, row_string, trimmed_float,
+};
 
 type SharedText = Arc<str>;
 
@@ -177,12 +179,14 @@ pub struct PreparedTerminalData {
 
 pub fn prepare(
     conn: &Connection,
-    start_terminal_id: Option<i64>,
+    terminal_range: Option<(i64, Option<i64>)>,
 ) -> Result<PreparedTerminalData> {
-    let (start_terminal_id, end_terminal_id) = resolve_terminal_range_from_db(conn, start_terminal_id)?;
+    let (start_terminal_id, end_terminal_id) =
+        resolve_terminal_range_from_db(conn, terminal_range)?;
     let merged_data = generate_merged_data(conn, start_terminal_id, end_terminal_id)?;
-    let list_rows = build_terminal_list_rows(conn, &merged_data, start_terminal_id, end_terminal_id)?;
-    let revision = get_revision_code_from_config();
+    let list_rows =
+        build_terminal_list_rows(conn, &merged_data, start_terminal_id, end_terminal_id)?;
+    let revision = get_revision_code_from_config(conn)?;
     Ok(PreparedTerminalData {
         merged_data,
         list_rows,
@@ -190,32 +194,15 @@ pub fn prepare(
     })
 }
 
-fn prompt_terminal_range() -> Result<(i64, i64)> {
-    loop {
-        let raw = crate::common::prompt_line("请手动输入起始 TerminalID（终止不输入表示到最后一个）：")?;
-        let parts: Vec<&str> = raw.split_whitespace().collect();
-
-        match parts.as_slice() {
-            [start] if start.chars().all(|c| c.is_ascii_digit()) => {
-                let start_id = start.parse()?;
-                return Ok((start_id, 99_999_999));
-            }
-            [start, end]
-                if start.chars().all(|c| c.is_ascii_digit())
-                    && end.chars().all(|c| c.is_ascii_digit()) =>
-            {
-                let start_id = start.parse()?;
-                let end_id = end.parse()?;
-                return Ok((start_id, end_id));
-            }
-            _ => eprintln!("请输入有效的数字，并用空格分隔！"),
-        }
+impl PreparedTerminalData {
+    pub fn revision(&self) -> &str {
+        &self.revision
     }
 }
 
 fn resolve_terminal_range_from_db(
     conn: &Connection,
-    start_terminal_id_opt: Option<i64>,
+    terminal_range: Option<(i64, Option<i64>)>,
 ) -> Result<(i64, i64)> {
     let max_id_opt: Option<i64> = conn
         .query_row("SELECT MAX(ID) FROM Terminals", [], |row| row.get(0))
@@ -223,16 +210,18 @@ fn resolve_terminal_range_from_db(
         .context("查询 Terminals 最大 ID 时发生错误")?;
 
     let Some(max_id) = max_id_opt else {
-        eprintln!("Terminals表中没有任何记录，进入手动输入");
-        return prompt_terminal_range();
+        return Ok((1, 0));
     };
 
-    if let Some(start_id) = start_terminal_id_opt {
+    if let Some((start_id, requested_end)) = terminal_range {
         if start_id > max_id {
-            eprintln!("指定的起始ID({start_id})大于最大ID({max_id})，进入手动输入");
-            return prompt_terminal_range();
+            return Ok((max_id + 1, max_id));
         }
-        return Ok((start_id, max_id));
+        let end_id = requested_end.unwrap_or(max_id);
+        if end_id > max_id {
+            anyhow::bail!("结束 TerminalID({end_id})大于数据库最大 ID({max_id})");
+        }
+        return Ok((start_id, end_id));
     }
 
     let anchor_id_opt: Option<i64> = conn
@@ -245,13 +234,11 @@ fn resolve_terminal_range_from_db(
         .context("查询 Terminals 表时发生错误")?;
 
     let Some(anchor_id) = anchor_id_opt else {
-        eprintln!("未找到 ICAO=ZYYJ 且 Name=Q09 的 Terminals 记录，进入手动输入");
-        return prompt_terminal_range();
+        anyhow::bail!("未找到 Terminal 增量锚点 ICAO=ZYYJ, Name=Q09；请显式指定 ID 范围");
     };
 
     if anchor_id >= max_id {
-        eprintln!("ZYYJ/Q09 记录ID({anchor_id})已是或超出最大TerminalID({max_id})，进入手动输入");
-        return prompt_terminal_range();
+        return Ok((max_id + 1, max_id));
     }
 
     Ok((anchor_id + 1, max_id))
@@ -259,7 +246,6 @@ fn resolve_terminal_range_from_db(
 
 pub fn write_prepared(prepared: &PreparedTerminalData, navdata_path: &Path) -> Result<()> {
     let permanent_path = navdata_path.join("Permanent");
-    let supplemental_path = navdata_path.join("Supplemental");
 
     let merged_rows_by_file = group_merged_rows_by_file(&prepared.merged_data);
 
@@ -274,23 +260,27 @@ pub fn write_prepared(prepared: &PreparedTerminalData, navdata_path: &Path) -> R
         write_terminal_file(pending_file, &merged_rows_by_file)?;
     }
 
-    crate::common::write_text_file(
-        &supplemental_path.join("FMC_Ident.txt"),
-        &format!("[Ident]\nSuppData=NAIP-{}\n", prepared.revision),
-    )?;
     Ok(())
 }
 
-fn group_merged_rows_by_file<'a>(merged_rows: &'a [MergedLeg]) -> HashMap<TerminalFileKey, IndexedTerminalFileRows<'a>> {
+fn group_merged_rows_by_file<'a>(
+    merged_rows: &'a [MergedLeg],
+) -> HashMap<TerminalFileKey, IndexedTerminalFileRows<'a>> {
     let mut grouped: HashMap<TerminalFileKey, IndexedTerminalFileRows<'a>> = HashMap::new();
     for row in merged_rows {
         let file_key = merged_leg_file_key(row);
         let section_key = merged_leg_section_key(row);
-        let indexed = grouped.entry(file_key).or_insert_with(|| IndexedTerminalFileRows {
-            section_keys: Vec::new(),
-            ordered_rows: Vec::new(),
-        });
-        let section_index = if let Some(section_index) = indexed.section_keys.iter().position(|candidate| candidate == &section_key) {
+        let indexed = grouped
+            .entry(file_key)
+            .or_insert_with(|| IndexedTerminalFileRows {
+                section_keys: Vec::new(),
+                ordered_rows: Vec::new(),
+            });
+        let section_index = if let Some(section_index) = indexed
+            .section_keys
+            .iter()
+            .position(|candidate| candidate == &section_key)
+        {
             section_index
         } else {
             indexed.section_keys.push(section_key);
@@ -311,7 +301,10 @@ fn generate_merged_data(
         return Ok(Vec::new());
     }
     let airport_ids: Vec<i64> = airports.iter().map(|airport| airport.id).collect();
-    let airport_by_id: HashMap<i64, Airport> = airports.into_iter().map(|airport| (airport.id, airport)).collect();
+    let airport_by_id: HashMap<i64, Airport> = airports
+        .into_iter()
+        .map(|airport| (airport.id, airport))
+        .collect();
 
     let runways = load_runways(conn, &airport_ids)?;
 
@@ -320,13 +313,20 @@ fn generate_merged_data(
         return Ok(Vec::new());
     }
     let terminal_ids: Vec<i64> = terminals.iter().map(|terminal| terminal.id).collect();
-    let terminal_by_id: HashMap<i64, TerminalDef> = terminals.iter().cloned().map(|terminal| (terminal.id, terminal)).collect();
+    let terminal_by_id: HashMap<i64, TerminalDef> = terminals
+        .iter()
+        .cloned()
+        .map(|terminal| (terminal.id, terminal))
+        .collect();
 
     let terminal_legs = load_terminal_legs(conn, &terminal_ids)?;
     let terminal_leg_ids: Vec<i64> = terminal_legs.iter().map(|leg| leg.id).collect();
 
     let terminal_legs_ex = load_terminal_legs_ex(conn, &terminal_leg_ids)?;
-    let terminal_leg_ex_by_id: HashMap<i64, TerminalLegExRow> = terminal_legs_ex.into_iter().map(|row| (row.id, row)).collect();
+    let terminal_leg_ex_by_id: HashMap<i64, TerminalLegExRow> = terminal_legs_ex
+        .into_iter()
+        .map(|row| (row.id, row))
+        .collect();
 
     let nav_ids: Vec<i64> = terminal_legs.iter().filter_map(|leg| leg.nav_id).collect();
 
@@ -438,7 +438,12 @@ fn load_runways(conn: &Connection, airport_ids: &[i64]) -> Result<Vec<Runway>> {
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
-fn load_terminals(conn: &Connection, airport_ids: &[i64], start_terminal_id: i64, end_terminal_id: i64) -> Result<Vec<TerminalDef>> {
+fn load_terminals(
+    conn: &Connection,
+    airport_ids: &[i64],
+    start_terminal_id: i64,
+    end_terminal_id: i64,
+) -> Result<Vec<TerminalDef>> {
     let query = format!(
         "SELECT ID, AirportID, Proc, ICAO, Name, Rwy FROM Terminals WHERE ID BETWEEN ? AND ? AND AirportID IN ({})",
         join_i64_values(airport_ids)
@@ -488,7 +493,10 @@ fn load_terminal_legs(conn: &Connection, terminal_ids: &[i64]) -> Result<Vec<Ter
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
-fn load_terminal_legs_ex(conn: &Connection, terminal_leg_ids: &[i64]) -> Result<Vec<TerminalLegExRow>> {
+fn load_terminal_legs_ex(
+    conn: &Connection,
+    terminal_leg_ids: &[i64],
+) -> Result<Vec<TerminalLegExRow>> {
     let query = format!(
         "SELECT ID, IsFlyOver, SpeedLimit, SpeedLimitDescription FROM TerminalLegsEx WHERE ID IN ({})",
         join_i64_values(terminal_leg_ids)
@@ -560,7 +568,10 @@ fn apply_map_logic(
         let row = &mut merged_rows[index];
         row.map = Some(1);
 
-        let runway_ident = row.rwy.as_deref().map(|value| normalize_runway_value(Some(value)));
+        let runway_ident = row
+            .rwy
+            .as_deref()
+            .map(|value| normalize_runway_value(Some(value)));
         let runway = runway_ident
             .as_ref()
             .map(|ident| (row.airport_id, ident.clone()))
@@ -568,7 +579,9 @@ fn apply_map_logic(
             .and_then(|key| runways_by_airport_and_ident.get(key));
 
         if let (Some(latitude), Some(longitude)) = (row.latitude, row.longitude) {
-            if let Some(name_lookup) = waypoint_by_coordinates.get(&(latitude.to_bits(), longitude.to_bits())) {
+            if let Some(name_lookup) =
+                waypoint_by_coordinates.get(&(latitude.to_bits(), longitude.to_bits()))
+            {
                 match name_lookup {
                     CoordinateNameLookup::Single(name) => row.name = Some((*name).to_string()),
                     CoordinateNameLookup::Multiple if row.name.is_none() => {
@@ -593,7 +606,8 @@ fn apply_map_logic(
 
         let runway_elevation = runway.and_then(|value| value.elevation);
         let slope_value = row.slope;
-        let Some((Some(previous_altitude), Some((previous_lat, previous_lon)))) = previous_context else {
+        let Some((Some(previous_altitude), Some((previous_lat, previous_lon)))) = previous_context
+        else {
             continue;
         };
         let (Some(current_lat), Some(current_lon)) = (row.latitude, row.longitude) else {
@@ -603,7 +617,8 @@ fn apply_map_logic(
             continue;
         };
 
-        let distance_m: f64 = geodesic.inverse(previous_lat, previous_lon, current_lat, current_lon);
+        let distance_m: f64 =
+            geodesic.inverse(previous_lat, previous_lon, current_lat, current_lon);
         let distance_ft = distance_m / 0.3048;
         let altitude = previous_altitude - distance_ft * slope_value.to_radians().tan();
         let fallback = runway_elevation.round() + 50.0;
@@ -717,7 +732,9 @@ fn apply_terminal_post_processing(merged_rows: &mut Vec<MergedLeg>) {
     *merged_rows = expanded_rows;
 }
 
-fn build_transition_runway_lookup(merged_rows: &[MergedLeg]) -> HashMap<String, HashMap<String, Vec<String>>> {
+fn build_transition_runway_lookup(
+    merged_rows: &[MergedLeg],
+) -> HashMap<String, HashMap<String, Vec<String>>> {
     let mut grouped = HashMap::new();
     for row in merged_rows {
         if !row.transition.starts_with("RW") {
@@ -733,13 +750,20 @@ fn build_transition_runway_lookup(merged_rows: &[MergedLeg]) -> HashMap<String, 
     grouped
 }
 
-fn build_terminal_runway_lookup(merged_rows: &[MergedLeg]) -> HashMap<String, HashMap<String, Vec<String>>> {
+fn build_terminal_runway_lookup(
+    merged_rows: &[MergedLeg],
+) -> HashMap<String, HashMap<String, Vec<String>>> {
     let mut grouped = HashMap::new();
     for row in merged_rows {
         let Some(rwy) = row.rwy.as_ref() else {
             continue;
         };
-        push_unique_nested_value(&mut grouped, row.icao.as_ref(), row.terminal.as_ref(), rwy.to_string());
+        push_unique_nested_value(
+            &mut grouped,
+            row.icao.as_ref(),
+            row.terminal.as_ref(),
+            rwy.to_string(),
+        );
     }
     grouped
 }
@@ -766,14 +790,12 @@ fn write_terminal_lists(
     permanent_path: &Path,
     navdata_path: &Path,
 ) -> Result<TerminalWriteResult> {
-    let supplemental_sid = navdata_path.join("Supplemental").join("Sid");
-    let supplemental_star = navdata_path.join("Supplemental").join("Star");
-    fs::create_dir_all(&supplemental_sid)?;
-    fs::create_dir_all(&supplemental_star)?;
-
     let mut grouped: HashMap<(String, String), Vec<ListRow>> = HashMap::new();
     for row in list_rows.iter().cloned() {
-        grouped.entry((row.icao.clone(), row.proc_code.clone())).or_default().push(row);
+        grouped
+            .entry((row.icao.clone(), row.proc_code.clone()))
+            .or_default()
+            .push(row);
     }
 
     let mut files = Vec::new();
@@ -804,9 +826,9 @@ fn build_terminal_list_rows(
     let runway_lookup = build_terminal_runway_lookup(merged_rows);
     let mut rows = Vec::new();
     for row in merged_rows {
-        if matches!(row.type_code.as_str(), "6" | "A") {
+        if let Some(proc_code) = transition_file_code(row) {
             rows.push(ListRow {
-                proc_code: row.type_code.clone(),
+                proc_code: proc_code.to_string(),
                 icao: row.icao.to_string(),
                 name: row.transition.clone(),
                 rwy: Some(row.terminal.to_string()),
@@ -814,9 +836,8 @@ fn build_terminal_list_rows(
         }
     }
 
-    let mut stmt = conn.prepare(
-        "SELECT Proc, ICAO, Name, Rwy FROM Terminals WHERE ID BETWEEN ? AND ?",
-    )?;
+    let mut stmt =
+        conn.prepare("SELECT Proc, ICAO, Name, Rwy FROM Terminals WHERE ID BETWEEN ? AND ?")?;
     let terminal_rows = stmt.query_map(params![start_terminal_id, end_terminal_id], |row| {
         Ok(ListRow {
             proc_code: row_string(row, 0)?,
@@ -879,11 +900,8 @@ fn write_list_file(
     };
     let supplemental_root = navdata_path.join("Supplemental");
     let output_exists = file_name.exists();
-    let seed_file = load_seed_terminal_file_contents(
-        permanent_path,
-        &supplemental_root,
-        &file_name,
-    )?;
+    let seed_file =
+        load_seed_terminal_file_contents(permanent_path, &supplemental_root, &file_name)?;
     let file_key = TerminalFileKey {
         icao: icao.to_string(),
         proc_code: proc_code.to_string(),
@@ -892,7 +910,11 @@ fn write_list_file(
     let mut missing_list_count = 0usize;
     for row in rows {
         let runway = zfill_runway_value(row.rwy.as_deref());
-        if parsed_seed.existing.map.contains_key(&(row.name.clone(), runway.clone())) {
+        if parsed_seed
+            .existing
+            .map
+            .contains_key(&(row.name.clone(), runway.clone()))
+        {
             continue;
         }
         missing_list_count += 1;
@@ -944,11 +966,42 @@ fn write_list_file(
 
 fn terminal_output_path(icao: &str, proc_code: &str, navdata_path: &Path) -> Option<PathBuf> {
     match proc_code {
-        "2" => Some(navdata_path.join("Supplemental").join("Sid").join(format!("{icao}.sid"))),
-        "1" => Some(navdata_path.join("Supplemental").join("Star").join(format!("{icao}.star"))),
-        "3" => Some(navdata_path.join("Supplemental").join("Star").join(format!("{icao}.app"))),
-        "6" => Some(navdata_path.join("Supplemental").join("Sid").join(format!("{icao}.sidtrs"))),
-        "A" => Some(navdata_path.join("Supplemental").join("Star").join(format!("{icao}.apptrs"))),
+        "2" => Some(
+            navdata_path
+                .join("Supplemental")
+                .join("Sid")
+                .join(format!("{icao}.sid")),
+        ),
+        "1" => Some(
+            navdata_path
+                .join("Supplemental")
+                .join("Star")
+                .join(format!("{icao}.star")),
+        ),
+        "3" => Some(
+            navdata_path
+                .join("Supplemental")
+                .join("Star")
+                .join(format!("{icao}.app")),
+        ),
+        "6" => Some(
+            navdata_path
+                .join("Supplemental")
+                .join("Sid")
+                .join(format!("{icao}.sidtrs")),
+        ),
+        "4" => Some(
+            navdata_path
+                .join("Supplemental")
+                .join("Star")
+                .join(format!("{icao}.startrs")),
+        ),
+        "A" => Some(
+            navdata_path
+                .join("Supplemental")
+                .join("Star")
+                .join(format!("{icao}.apptrs")),
+        ),
         _ => None,
     }
 }
@@ -1047,7 +1100,11 @@ fn write_terminal_file(
 
     let mut output = file_state.base_contents;
     if !generated_sections.is_empty() {
-        let trailing_newlines = output.bytes().rev().take_while(|byte| *byte == b'\n').count();
+        let trailing_newlines = output
+            .bytes()
+            .rev()
+            .take_while(|byte| *byte == b'\n')
+            .count();
         if !output.is_empty() && trailing_newlines < 2 {
             for _ in trailing_newlines..2 {
                 output.push('\n');
@@ -1066,7 +1123,10 @@ fn write_terminal_file(
 }
 
 fn parse_terminal_file_contents(file_path: &Path, contents: &str) -> ParsedTerminalFile {
-    let extension = file_path.extension().and_then(|ext| ext.to_str()).unwrap_or_default();
+    let extension = file_path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or_default();
     let should_parse_details = matches!(extension, "app" | "apptrs" | "sid" | "sidtrs" | "star");
 
     let mut existing = ExistingProcedureList::default();
@@ -1089,7 +1149,9 @@ fn parse_terminal_file_contents(file_path: &Path, contents: &str) -> ParsedTermi
                     rwy: rwy.to_string(),
                     seq,
                 });
-                existing.map.insert((name.to_string(), rwy.to_string()), seq);
+                existing
+                    .map
+                    .insert((name.to_string(), rwy.to_string()), seq);
                 insert_procedure_lookup(&mut existing.procedures, name, rwy);
                 max_seq = max_seq.max(seq);
             }
@@ -1104,10 +1166,7 @@ fn parse_terminal_file_contents(file_path: &Path, contents: &str) -> ParsedTermi
 
     existing.next_seq = max_seq + 1;
 
-    ParsedTerminalFile {
-        existing,
-        details,
-    }
+    ParsedTerminalFile { existing, details }
 }
 
 fn build_list_file_contents(existing_contents: &str, entries: &[ProcedureListEntry]) -> String {
@@ -1118,11 +1177,18 @@ fn build_list_file_contents(existing_contents: &str, entries: &[ProcedureListEnt
         .find_map(|(index, line)| line.starts_with('[').then_some(index))
         .and_then(|index| nth_line_byte_index(existing_contents, index));
 
-    let suffix = detail_start.map(|start| &existing_contents[start..]).unwrap_or_default();
-    let mut output = String::with_capacity(existing_contents.len() + entries.len().saturating_mul(24));
+    let suffix = detail_start
+        .map(|start| &existing_contents[start..])
+        .unwrap_or_default();
+    let mut output =
+        String::with_capacity(existing_contents.len() + entries.len().saturating_mul(24));
     output.push_str("[list]\n");
     for entry in entries {
-        let _ = writeln!(&mut output, "Procedure.{}={}.{}", entry.seq, entry.name, entry.rwy);
+        let _ = writeln!(
+            &mut output,
+            "Procedure.{}={}.{}",
+            entry.seq, entry.name, entry.rwy
+        );
     }
     output.push_str(suffix.trim_start_matches('\n'));
     output
@@ -1165,7 +1231,11 @@ fn build_speed_limit(ex: Option<&TerminalLegExRow>) -> Option<String> {
 fn build_cross_this_point(ex: Option<&TerminalLegExRow>) -> Option<String> {
     match ex.and_then(|value| value.is_fly_over) {
         Some(0) => None,
-        Some(value) => Some(value.to_f64().map_or_else(|| value.to_string(), |raw| format!("{raw:.1}"))),
+        Some(value) => Some(
+            value
+                .to_f64()
+                .map_or_else(|| value.to_string(), |raw| format!("{raw:.1}")),
+        ),
         None => Some("nan".to_string()),
     }
 }
@@ -1174,7 +1244,11 @@ fn parse_procedure_line(line: &str) -> Option<(usize, &str, &str)> {
     let payload = line.strip_prefix("Procedure.")?;
     let (seq, name_rwy) = payload.split_once('=')?;
     let (name, rwy) = name_rwy.rsplit_once('.')?;
-    if name.is_empty() || rwy.is_empty() || name.contains(char::is_whitespace) || rwy.contains(char::is_whitespace) {
+    if name.is_empty()
+        || rwy.is_empty()
+        || name.contains(char::is_whitespace)
+        || rwy.contains(char::is_whitespace)
+    {
         return None;
     }
     Some((seq.parse().ok()?, name, rwy))
@@ -1186,18 +1260,18 @@ fn parse_detail_line(line: &str) -> Option<(&str, &str)> {
     let name = parts.next()?;
     let rwy = parts.next()?;
     parts.next()?;
-    if name.is_empty() || rwy.is_empty() || name.contains(char::is_whitespace) || rwy.contains(char::is_whitespace) {
+    if name.is_empty()
+        || rwy.is_empty()
+        || name.contains(char::is_whitespace)
+        || rwy.contains(char::is_whitespace)
+    {
         return None;
     }
     Some((name, rwy))
 }
 
 fn merged_leg_file_key(row: &MergedLeg) -> TerminalFileKey {
-    let proc_code = if matches!(row.type_code.as_str(), "6" | "A") {
-        row.type_code.clone()
-    } else {
-        row.proc_code.clone()
-    };
+    let proc_code = transition_file_code(row).map_or_else(|| row.proc_code.clone(), str::to_string);
     TerminalFileKey {
         icao: row.icao.to_string(),
         proc_code,
@@ -1205,7 +1279,7 @@ fn merged_leg_file_key(row: &MergedLeg) -> TerminalFileKey {
 }
 
 fn merged_leg_section_key(row: &MergedLeg) -> TerminalSectionKey {
-    if matches!(row.type_code.as_str(), "6" | "A") {
+    if transition_file_code(row).is_some() {
         TerminalSectionKey {
             transition: row.transition.clone(),
             via: row.terminal.to_string(),
@@ -1215,6 +1289,20 @@ fn merged_leg_section_key(row: &MergedLeg) -> TerminalSectionKey {
             transition: row.terminal.to_string(),
             via: zfill_runway_value(row.rwy.as_deref()),
         }
+    }
+}
+
+/// Maps Fenix transition leg types to iFly's dedicated transition files.
+fn transition_file_code(row: &MergedLeg) -> Option<&'static str> {
+    transition_file_code_values(&row.proc_code, &row.type_code)
+}
+
+fn transition_file_code_values(proc_code: &str, type_code: &str) -> Option<&'static str> {
+    match (proc_code, type_code) {
+        ("1", "1" | "4") => Some("4"),
+        ("2", "3" | "6") => Some("6"),
+        ("3", "A") => Some("A"),
+        _ => None,
     }
 }
 
@@ -1253,7 +1341,11 @@ fn generate_missing_leg_sections(
         }
         wrote_section = true;
 
-        let _ = writeln!(&mut output, "[{}.{}.{}]", section_key.transition, section_key.via, seq);
+        let _ = writeln!(
+            &mut output,
+            "[{}.{}.{}]",
+            section_key.transition, section_key.via, seq
+        );
         append_leg_field(&mut output, "Leg", row.leg.as_deref());
         append_leg_field(&mut output, "TurnDirection", row.turn_direction.as_deref());
         append_leg_field(&mut output, "Name", row.name.as_deref());
@@ -1268,7 +1360,11 @@ fn generate_missing_leg_sections(
         append_leg_field(&mut output, "NavDist", row.nav_dist.as_deref());
         append_leg_field(&mut output, "Heading", row.heading.as_deref());
         append_leg_field(&mut output, "Dist", row.dist.as_deref());
-        append_leg_field(&mut output, "CrossThisPoint", row.cross_this_point.as_deref());
+        append_leg_field(
+            &mut output,
+            "CrossThisPoint",
+            row.cross_this_point.as_deref(),
+        );
         append_leg_field(&mut output, "Altitude", row.altitude.as_deref());
 
         let map = row.map.map(|value| value.to_string());
@@ -1326,7 +1422,9 @@ fn insert_procedure_lookup(grouped: &mut HashMap<String, HashSet<String>>, name:
 }
 
 fn lookup_contains(grouped: &HashMap<String, HashSet<String>>, left: &str, right: &str) -> bool {
-    grouped.get(left).is_some_and(|values| values.contains(right))
+    grouped
+        .get(left)
+        .is_some_and(|values| values.contains(right))
 }
 
 fn append_leg_field(section: &mut String, key: &str, value: Option<&str>) {
@@ -1335,33 +1433,30 @@ fn append_leg_field(section: &mut String, key: &str, value: Option<&str>) {
     }
 }
 
-fn get_revision_code_from_config() -> String {
-    let db_path = PathBuf::from(r"C:\ProgramData\Fenix\Navdata\nd.db3");
-    if !db_path.exists() {
-        return "None".to_string();
-    }
-
-    let row = (|| -> Result<Option<String>> {
-        let conn = Connection::open(&db_path)
-            .with_context(|| format!("无法连接配置数据库: {}", db_path.display()))?;
-        let value = conn.query_row(
+fn get_revision_code_from_config(conn: &Connection) -> Result<String> {
+    let value = conn
+        .query_row(
             "SELECT val FROM config WHERE key='CycleName' LIMIT 1",
             [],
             |row| row_opt_string(row, 0),
         )
-        .optional()?;
-        Ok(value.flatten())
-    })();
-
-    match row {
-        Ok(Some(value)) => value.trim().to_string(),
-        Ok(None) => "2601".to_string(),
-        Err(_) => "None".to_string(),
+        .optional()
+        .context("无法读取 Fenix config.CycleName")?
+        .flatten()
+        .context("Fenix config 缺少 CycleName")?;
+    let revision = value.trim().to_string();
+    if revision.len() != 4 || !revision.chars().all(|character| character.is_ascii_digit()) {
+        anyhow::bail!("Fenix config.CycleName 无效: {revision:?}");
     }
+    Ok(revision)
 }
 
 fn join_i64_values(values: &[i64]) -> String {
-    values.iter().map(i64::to_string).collect::<Vec<_>>().join(", ")
+    values
+        .iter()
+        .map(i64::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn normalize_runway_value(raw_value: Option<&str>) -> String {
@@ -1405,4 +1500,19 @@ fn build_runway_ident(terminal_value: &str) -> String {
         }
     }
     "RWXX".to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::transition_file_code_values;
+
+    #[test]
+    fn maps_all_ifly_transition_families() {
+        assert_eq!(transition_file_code_values("1", "1"), Some("4"));
+        assert_eq!(transition_file_code_values("1", "4"), Some("4"));
+        assert_eq!(transition_file_code_values("2", "3"), Some("6"));
+        assert_eq!(transition_file_code_values("2", "6"), Some("6"));
+        assert_eq!(transition_file_code_values("3", "A"), Some("A"));
+        assert_eq!(transition_file_code_values("1", "2"), None);
+    }
 }
