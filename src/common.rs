@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
 use num_traits::ToPrimitive;
-use rusqlite::{types::ValueRef, Connection, Row};
+use rusqlite::{types::ValueRef, Connection, OpenFlags, Row};
 
 #[derive(Debug, Clone)]
 pub struct NavdataTarget {
@@ -56,8 +56,8 @@ pub fn prompt_line(prompt: &str) -> Result<String> {
 
 pub fn sanitize_input_path(raw: &str) -> String {
     raw.trim()
-    .trim_start_matches(['\'', '"', '&', ' '])
-    .trim_end_matches(['\'', '"', ' '])
+        .trim_start_matches(['\'', '"', '&', ' '])
+        .trim_end_matches(['\'', '"', ' '])
         .to_string()
 }
 
@@ -82,8 +82,18 @@ pub fn open_fenix_connection(path: &Path) -> Result<Connection> {
         bail!("不是有效的 db3 文件: {}", path.display());
     }
 
-    let conn = Connection::open(path)
-        .with_context(|| format!("无法连接数据库: {}", path.display()))?;
+    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    let escaped_path = path
+        .to_string_lossy()
+        .replace('%', "%25")
+        .replace(' ', "%20")
+        .replace('#', "%23")
+        .replace('?', "%3F");
+    let conn = Connection::open_with_flags(
+        format!("file:{escaped_path}?immutable=1"),
+        flags | OpenFlags::SQLITE_OPEN_URI,
+    )
+    .with_context(|| format!("无法以只读方式连接数据库: {}", path.display()))?;
 
     let mut tables = std::collections::HashSet::new();
     {
@@ -100,7 +110,10 @@ pub fn open_fenix_connection(path: &Path) -> Result<Connection> {
         .filter(|name| !tables.contains(*name))
         .collect();
     if !missing.is_empty() {
-        bail!("所读取文件不是Fenix数据库格式，缺少表: {}", missing.join(", "));
+        bail!(
+            "所读取文件不是Fenix数据库格式，缺少表: {}",
+            missing.join(", ")
+        );
     }
 
     Ok(conn)
@@ -120,6 +133,7 @@ pub fn resolve_navdata_paths(
     }
 
     if let Some(navdata) = navdata_path {
+        let navdata = normalize_navdata_root(&navdata);
         let route = navdata.join("Permanent").join("WPNAVRTE.txt");
         return Ok(vec![NavdataTarget {
             source_label: "手动指定".to_string(),
@@ -143,6 +157,19 @@ pub fn resolve_navdata_paths(
     })
 }
 
+/// Accept either the `navdata` root or its `Permanent` child.
+pub fn normalize_navdata_root(path: &Path) -> PathBuf {
+    if path
+        .file_name()
+        .is_some_and(|name| name.eq_ignore_ascii_case("Permanent"))
+    {
+        return path
+            .parent()
+            .map_or_else(|| path.to_path_buf(), Path::to_path_buf);
+    }
+    path.to_path_buf()
+}
+
 pub fn auto_detect_navdata_paths() -> Result<Vec<NavdataTarget>> {
     auto_detect_route_file()
 }
@@ -164,7 +191,12 @@ pub fn announce_navdata_targets(targets: &[NavdataTarget]) {
 
     println!("找到多个航路文件目录，将自动处理所有目录:");
     for (index, target) in targets.iter().enumerate() {
-        println!("{}: {} 目录 - {}", index + 1, target.source_label, target.route_file.display());
+        println!(
+            "{}: {} 目录 - {}",
+            index + 1,
+            target.source_label,
+            target.route_file.display()
+        );
     }
 }
 
@@ -172,27 +204,21 @@ pub fn derive_navdata_path(route_file: &Path) -> PathBuf {
     route_file
         .parent()
         .and_then(Path::parent)
-    .map_or_else(|| route_file.to_path_buf(), Path::to_path_buf)
+        .map_or_else(|| route_file.to_path_buf(), Path::to_path_buf)
 }
 
 pub fn resolve_terminal_range(
     start_terminal_id: Option<i64>,
     end_terminal_id: Option<i64>,
-) -> Result<Option<i64>> {
+) -> Result<Option<(i64, Option<i64>)>> {
     match (start_terminal_id, end_terminal_id) {
-        (Some(start), Some(_end)) => Ok(Some(start)),
-        (Some(start), None) => Ok(Some(start)),
+        (Some(start), Some(end)) if end < start => {
+            bail!("结束 TerminalID 不能小于起始 TerminalID")
+        }
+        (Some(start), Some(end)) => Ok(Some((start, Some(end)))),
+        (Some(start), None) => Ok(Some((start, None))),
         (None, Some(_)) => bail!("提供结束 TerminalID 时也需要提供起始 TerminalID"),
         (None, None) => Ok(None),
-    }
-}
-
-pub fn delete_data_navdatasupplemental(navdata_path: &Path) {
-    if let Some(parent) = navdata_path.parent() {
-        let target = parent.join("navdataSupplemental");
-        if target.exists() {
-            let _ = fs::remove_dir_all(&target);
-        }
     }
 }
 
@@ -227,8 +253,71 @@ pub fn to_crlf(input: &str) -> String {
 }
 
 pub fn write_text_file(path: &Path, contents: &str) -> Result<()> {
-    fs::write(path, to_crlf(contents))
-        .with_context(|| format!("无法写入 {}", path.display()))?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow!("无法确定输出目录: {}", path.display()))?;
+    fs::create_dir_all(parent).with_context(|| format!("无法创建输出目录 {}", parent.display()))?;
+    let temporary = path.with_extension(format!(
+        "{}.tmp",
+        path.extension()
+            .and_then(OsStr::to_str)
+            .unwrap_or("navdata")
+    ));
+    fs::write(&temporary, to_crlf(contents))
+        .with_context(|| format!("无法写入临时文件 {}", temporary.display()))?;
+    let swap = path.with_extension(format!(
+        "{}.ifly-ndb-swap",
+        path.extension()
+            .and_then(OsStr::to_str)
+            .unwrap_or("navdata")
+    ));
+    if swap.exists() {
+        fs::remove_file(&swap).with_context(|| format!("无法清理旧交换文件 {}", swap.display()))?;
+    }
+    let had_existing = path.exists();
+    if had_existing {
+        fs::rename(path, &swap).with_context(|| format!("无法暂存现有文件 {}", path.display()))?;
+    }
+    if let Err(error) = fs::rename(&temporary, path) {
+        let _ = fs::remove_file(&temporary);
+        if had_existing {
+            let _ = fs::rename(&swap, path);
+        }
+        return Err(error).with_context(|| format!("无法替换 {}", path.display()));
+    }
+    if had_existing {
+        fs::remove_file(&swap).with_context(|| format!("无法清理交换文件 {}", swap.display()))?;
+    }
+    Ok(())
+}
+
+/// Synchronize the supplemental AIRAC marker with the selected source DB.
+pub fn sync_supplemental_ident(navdata_path: &Path, revision: &str) -> Result<()> {
+    let supplemental_path = navdata_path.join("Supplemental");
+    if !supplemental_path.exists() {
+        return Ok(());
+    }
+
+    let ident_path = supplemental_path.join("FMC_Ident.txt");
+    let has_payload = walkdir::WalkDir::new(&supplemental_path)
+        .min_depth(1)
+        .into_iter()
+        .filter_map(std::result::Result::ok)
+        .any(|entry| {
+            entry.file_type().is_file()
+                && entry.path() != ident_path
+                && entry.metadata().is_ok_and(|metadata| metadata.len() > 0)
+        });
+
+    if has_payload {
+        if revision.len() != 4 || !revision.chars().all(|character| character.is_ascii_digit()) {
+            bail!("Fenix config.CycleName 无效，拒绝写入 Supplemental: {revision:?}");
+        }
+        write_text_file(&ident_path, &format!("[Ident]\nSuppData=NAIP-{revision}\n"))?;
+    } else if ident_path.exists() {
+        fs::remove_file(&ident_path)
+            .with_context(|| format!("无法删除无数据的 {}", ident_path.display()))?;
+    }
     Ok(())
 }
 
@@ -246,7 +335,9 @@ pub fn row_opt_f64(row: &Row<'_>, idx: usize) -> rusqlite::Result<Option<f64>> {
     Ok(match value {
         ValueRef::Real(value) => Some(value),
         ValueRef::Integer(value) => value.to_f64(),
-        ValueRef::Text(value) => std::str::from_utf8(value).ok().and_then(|text| text.parse().ok()),
+        ValueRef::Text(value) => std::str::from_utf8(value)
+            .ok()
+            .and_then(|text| text.parse().ok()),
         ValueRef::Null | ValueRef::Blob(_) => None,
     })
 }
@@ -256,7 +347,9 @@ pub fn row_opt_i64(row: &Row<'_>, idx: usize) -> rusqlite::Result<Option<i64>> {
     Ok(match value {
         ValueRef::Integer(value) => Some(value),
         ValueRef::Real(value) => value.round().to_i64(),
-        ValueRef::Text(value) => std::str::from_utf8(value).ok().and_then(|text| text.parse().ok()),
+        ValueRef::Text(value) => std::str::from_utf8(value)
+            .ok()
+            .and_then(|text| text.parse().ok()),
         ValueRef::Null | ValueRef::Blob(_) => None,
     })
 }
@@ -286,7 +379,9 @@ fn auto_detect_route_file() -> Result<Vec<NavdataTarget>> {
     let paths_to_check = [
         (
             "MSFS2020 (Microsoft Store)",
-            expand_env(r"%LocalAppData%\Packages\Microsoft.FlightSimulator_8wekyb3d8bbwe\LocalCache\UserCfg.opt"),
+            expand_env(
+                r"%LocalAppData%\Packages\Microsoft.FlightSimulator_8wekyb3d8bbwe\LocalCache\UserCfg.opt",
+            ),
         ),
         (
             "MSFS2020 (Steam)",
@@ -297,11 +392,15 @@ fn auto_detect_route_file() -> Result<Vec<NavdataTarget>> {
     let mut route_files = vec![
         (
             "MSFS2024 (Microsoft Store)".to_string(),
-            expand_env(r"%LocalAppData%\Packages\Microsoft.Limitless_8wekyb3d8bbwe\LocalState\WASM\MSFS2020\ifly-aircraft-737max8\work\navdata\Permanent\WPNAVRTE.txt"),
+            expand_env(
+                r"%LocalAppData%\Packages\Microsoft.Limitless_8wekyb3d8bbwe\LocalState\WASM\MSFS2020\ifly-aircraft-737max8\work\navdata\Permanent\WPNAVRTE.txt",
+            ),
         ),
         (
             "MSFS2024 (Steam)".to_string(),
-            expand_env(r"%AppData%\Microsoft Flight Simulator 2024\WASM\MSFS2020\ifly-aircraft-737max8\work\navdata\Permanent\WPNAVRTE.txt"),
+            expand_env(
+                r"%AppData%\Microsoft Flight Simulator 2024\WASM\MSFS2020\ifly-aircraft-737max8\work\navdata\Permanent\WPNAVRTE.txt",
+            ),
         ),
     ];
 
@@ -388,4 +487,37 @@ fn extract_quoted_value(line: &str) -> Option<String> {
     let rest = &line[start + 1..];
     let end = rest.find('"')?;
     Some(rest[..end].to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::{normalize_navdata_root, resolve_terminal_range, to_crlf};
+
+    #[test]
+    fn accepts_navdata_root_or_permanent_child() {
+        assert_eq!(
+            normalize_navdata_root(Path::new("/aircraft/navdata")),
+            Path::new("/aircraft/navdata")
+        );
+        assert_eq!(
+            normalize_navdata_root(Path::new("/aircraft/navdata/Permanent")),
+            Path::new("/aircraft/navdata")
+        );
+    }
+
+    #[test]
+    fn preserves_explicit_terminal_end() {
+        assert_eq!(
+            resolve_terminal_range(Some(10), Some(20)).unwrap(),
+            Some((10, Some(20)))
+        );
+        assert!(resolve_terminal_range(Some(20), Some(10)).is_err());
+    }
+
+    #[test]
+    fn normalizes_line_endings() {
+        assert_eq!(to_crlf("one\ntwo\r\n"), "one\r\ntwo\r\n");
+    }
 }

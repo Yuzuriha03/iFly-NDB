@@ -1,9 +1,3 @@
-mod common;
-mod enroute;
-mod geomag;
-mod layout;
-mod terminal;
-
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread;
@@ -15,23 +9,42 @@ use rayon::prelude::*;
 use rayon::ThreadPoolBuilder;
 use rusqlite::Connection;
 
+use ifly_ndb_converter::{common, enroute, terminal, validation};
+
 #[derive(Debug, Parser)]
-#[command(author, version, about = "Convert Fenix navdata to iFly Supplemental format")]
+#[command(
+    author,
+    version,
+    about = "Convert Fenix navdata to iFly Supplemental format"
+)]
 struct Cli {
+    /// Fenix nd.db3 source database.
     #[arg(long)]
     db_path: Option<PathBuf>,
+    /// NAIP RTE_SEG.csv airway segment file.
     #[arg(long)]
     csv_path: Option<PathBuf>,
+    /// Explicit iFly Permanent/WPNAVRTE.txt path.
     #[arg(long)]
     route_file: Option<PathBuf>,
+    /// iFly navdata root or its Permanent child.
     #[arg(long)]
     navdata_path: Option<PathBuf>,
+    /// First Fenix Terminal ID to convert (inclusive).
     #[arg(long)]
     start_terminal_id: Option<i64>,
+    /// Last Fenix Terminal ID to convert (inclusive).
     #[arg(long)]
     end_terminal_id: Option<i64>,
+    /// Do not update MSFS 2020 layout.json and manifest.json.
     #[arg(long)]
     skip_layout_update: bool,
+    /// Validate the Fenix database and iFly Permanent dataset without converting.
+    #[arg(long)]
+    validate_only: bool,
+    /// Do not wait ten seconds before exiting (useful for automation).
+    #[arg(long)]
+    no_countdown: bool,
 }
 
 fn main() {
@@ -45,8 +58,21 @@ fn run() -> Result<()> {
     let cli = Cli::parse();
 
     let db_path = resolve_db_path(cli.db_path)?;
+
+    if cli.validate_only {
+        let navdata_path = cli
+            .navdata_path
+            .as_deref()
+            .map(common::normalize_navdata_root)
+            .ok_or_else(|| anyhow!("--validate-only 需要同时提供 --navdata-path"))?;
+        let report = validation::validate_reference_dataset(&db_path, &navdata_path)?;
+        println!("{report}");
+        return Ok(());
+    }
+
     let db_connection_task = spawn_db_connection_task(db_path.clone());
-    let navdata_detect_task = spawn_navdata_detect_task(cli.route_file.as_ref(), cli.navdata_path.as_ref());
+    let navdata_detect_task =
+        spawn_navdata_detect_task(cli.route_file.as_ref(), cli.navdata_path.as_ref());
 
     let csv_path = match cli.csv_path {
         Some(path) => path,
@@ -54,11 +80,9 @@ fn run() -> Result<()> {
     };
     let enroute_prepare_task = spawn_enroute_prepare_task(db_path.clone(), csv_path);
 
-    let start_terminal_id = common::resolve_terminal_range(
-        cli.start_terminal_id,
-        cli.end_terminal_id,
-    )?;
-    let terminal_prepare_task = spawn_terminal_prepare_task(db_path, start_terminal_id);
+    let terminal_range =
+        common::resolve_terminal_range(cli.start_terminal_id, cli.end_terminal_id)?;
+    let terminal_prepare_task = spawn_terminal_prepare_task(db_path, terminal_range);
 
     let navdata_targets = resolve_navdata_targets(
         cli.route_file.as_ref(),
@@ -67,9 +91,7 @@ fn run() -> Result<()> {
     )?;
     let _validated_conn = join_worker(db_connection_task, "数据库连接与校验任务")??;
     let prepared_enroute = join_worker(enroute_prepare_task, "Enroute 预加载任务")??.map(Arc::new);
-    let prepared_terminal = Arc::new(
-        join_worker(terminal_prepare_task, "Terminals 预加载任务")??,
-    );
+    let prepared_terminal = Arc::new(join_worker(terminal_prepare_task, "Terminals 预加载任务")??);
 
     common::announce_navdata_targets(&navdata_targets);
 
@@ -113,7 +135,9 @@ fn run() -> Result<()> {
         }
     }
 
-    common::countdown_timer(10);
+    if !cli.no_countdown {
+        common::countdown_timer(10);
+    }
 
     Ok(())
 }
@@ -154,14 +178,13 @@ fn spawn_navdata_detect_task(
 
 fn spawn_terminal_prepare_task(
     db_path: PathBuf,
-    start_terminal_id: Option<i64>,
+    terminal_range: Option<(i64, Option<i64>)>,
 ) -> JoinHandle<Result<terminal::PreparedTerminalData>> {
     thread::spawn(move || {
         let conn = common::open_fenix_connection(&db_path)
             .with_context(|| format!("Terminals 预加载时无法连接数据库: {}", db_path.display()))?;
-        terminal::prepare(&conn, start_terminal_id).with_context(|| {
-            format!("Terminals 预加载失败: start_terminal_id={start_terminal_id:?}")
-        })
+        terminal::prepare(&conn, terminal_range)
+            .with_context(|| format!("Terminals 预加载失败: terminal_range={terminal_range:?}"))
     })
 }
 
@@ -187,17 +210,21 @@ fn resolve_navdata_targets(
 }
 
 fn join_worker<T>(handle: JoinHandle<Result<T>>, task_name: &str) -> Result<Result<T>> {
-    handle
-        .join()
-        .map_err(|payload| anyhow!("{task_name}发生线程 panic: {}", panic_payload_to_string(payload)))
+    handle.join().map_err(|payload| {
+        anyhow!(
+            "{task_name}发生线程 panic: {}",
+            panic_payload_to_string(payload)
+        )
+    })
 }
 
 fn panic_payload_to_string(payload: Box<dyn std::any::Any + Send + 'static>) -> String {
     match payload.downcast::<String>() {
         Ok(message) => *message,
-        Err(payload) => payload
-            .downcast::<&'static str>()
-            .map_or_else(|_| "unknown panic payload".to_string(), |message| (*message).to_string()),
+        Err(payload) => payload.downcast::<&'static str>().map_or_else(
+            |_| "unknown panic payload".to_string(),
+            |message| (*message).to_string(),
+        ),
     }
 }
 
@@ -209,6 +236,9 @@ fn process_navdata_target(
 ) -> Result<()> {
     let target_label = target.source_label.as_str();
 
+    validation::validate_navdata_cycle(&target.navdata_path, prepared_terminals.revision())
+        .with_context(|| format!("iFly 数据预检失败: {}", target.navdata_path.display()))?;
+
     if let Some(prepared_enroute) = prepared_enroute {
         enroute::write_prepared(prepared_enroute, &target.route_file, &target.navdata_path)
             .with_context(|| format!("处理 Enroute 失败: {}", target.navdata_path.display()))?;
@@ -219,7 +249,8 @@ fn process_navdata_target(
         .with_context(|| format!("处理 Terminal 失败: {}", target.navdata_path.display()))?;
     println!("[{target_label}] Terminal数据转换完毕");
 
-    common::delete_data_navdatasupplemental(&target.navdata_path);
+    common::sync_supplemental_ident(&target.navdata_path, prepared_terminals.revision())?;
+
     if !skip_layout_update && !target_label.starts_with("MSFS2024") {
         common::update_layout_json(&target.navdata_path)?;
     }

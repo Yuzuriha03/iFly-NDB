@@ -20,6 +20,7 @@ pub struct RouteLine {
 pub struct CheckedRouteData {
     existing_routes: BTreeMap<String, Vec<RouteLine>>,
     checked_routes: BTreeMap<String, Vec<RouteLine>>,
+    preamble: String,
 }
 
 #[derive(Clone, Debug)]
@@ -148,12 +149,14 @@ pub fn write_prepared_wpnavrte(
 
 pub fn check_route(file1: &Path, file2: &Path) -> Result<CheckedRouteData> {
     let existing_routes = read_file_to_dict(file1)?;
+    let preamble = read_route_preamble(file1)?;
     let generated_routes = read_generated_route_data(file2)?;
     let processed = process_dicts(&existing_routes, generated_routes.routes);
     let checked_routes = filter_checked_routes(processed, &generated_routes.naip_route_idents);
     Ok(CheckedRouteData {
         existing_routes,
         checked_routes,
+        preamble,
     })
 }
 
@@ -165,6 +168,7 @@ pub fn insert_and_order_route(
     let CheckedRouteData {
         mut existing_routes,
         checked_routes,
+        preamble,
     } = checked_data;
     compare_and_insert(&mut existing_routes, checked_routes);
     for segments in existing_routes.values_mut() {
@@ -172,8 +176,25 @@ pub fn insert_and_order_route(
             segment.segment_number = index + 1;
         }
     }
-    save_route_dict(file1, &existing_routes)?;
-    save_sample_to_file(generated_file)?;
+    let backup_file = file1.with_file_name(format!(
+        "{}.ifly-ndb.bak",
+        file1
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("WPNAVRTE.txt")
+    ));
+    if !backup_file.exists() {
+        fs::copy(file1, &backup_file).with_context(|| {
+            format!(
+                "无法备份航路文件 {} -> {}",
+                file1.display(),
+                backup_file.display()
+            )
+        })?;
+    }
+    save_route_dict(file1, &preamble, &existing_routes)?;
+    fs::remove_file(generated_file)
+        .with_context(|| format!("无法清理临时航路文件 {}", generated_file.display()))?;
     Ok(())
 }
 
@@ -209,14 +230,40 @@ fn load_csv_segments(csv_file_path: &Path) -> Result<Vec<CsvSegment>> {
         let record = record?;
         segments.push(CsvSegment {
             route_ident: record.get(route_idx).unwrap_or_default().trim().to_string(),
-            start_ident: normalize_route_fix_ident(record.get(start_idx).unwrap_or_default().trim()),
-            start_type: record.get(start_type_idx).unwrap_or_default().trim().to_string(),
-            start_lat_dms: record.get(start_lat_idx).unwrap_or_default().trim().to_string(),
-            start_lon_dms: record.get(start_lon_idx).unwrap_or_default().trim().to_string(),
+            start_ident: normalize_route_fix_ident(
+                record.get(start_idx).unwrap_or_default().trim(),
+            ),
+            start_type: record
+                .get(start_type_idx)
+                .unwrap_or_default()
+                .trim()
+                .to_string(),
+            start_lat_dms: record
+                .get(start_lat_idx)
+                .unwrap_or_default()
+                .trim()
+                .to_string(),
+            start_lon_dms: record
+                .get(start_lon_idx)
+                .unwrap_or_default()
+                .trim()
+                .to_string(),
             end_ident: normalize_route_fix_ident(record.get(end_idx).unwrap_or_default().trim()),
-            end_type: record.get(end_type_idx).unwrap_or_default().trim().to_string(),
-            end_lat_dms: record.get(end_lat_idx).unwrap_or_default().trim().to_string(),
-            end_lon_dms: record.get(end_lon_idx).unwrap_or_default().trim().to_string(),
+            end_type: record
+                .get(end_type_idx)
+                .unwrap_or_default()
+                .trim()
+                .to_string(),
+            end_lat_dms: record
+                .get(end_lat_idx)
+                .unwrap_or_default()
+                .trim()
+                .to_string(),
+            end_lon_dms: record
+                .get(end_lon_idx)
+                .unwrap_or_default()
+                .trim()
+                .to_string(),
         });
     }
     Ok(segments)
@@ -266,8 +313,18 @@ impl CoordinateResolver {
         let mut waypoint_idents = HashSet::new();
 
         for segment in csv_segments {
-            collect_lookup_ident(&mut navaid_idents, &mut waypoint_idents, &segment.start_type, &segment.start_ident);
-            collect_lookup_ident(&mut navaid_idents, &mut waypoint_idents, &segment.end_type, &segment.end_ident);
+            collect_lookup_ident(
+                &mut navaid_idents,
+                &mut waypoint_idents,
+                &segment.start_type,
+                &segment.start_ident,
+            );
+            collect_lookup_ident(
+                &mut navaid_idents,
+                &mut waypoint_idents,
+                &segment.end_type,
+                &segment.end_ident,
+            );
         }
 
         Ok(Self {
@@ -279,7 +336,13 @@ impl CoordinateResolver {
         })
     }
 
-    fn resolve(&mut self, ident: &str, latitude: f64, longitude: f64, point_type: &str) -> (f64, f64) {
+    fn resolve(
+        &mut self,
+        ident: &str,
+        latitude: f64,
+        longitude: f64,
+        point_type: &str,
+    ) -> (f64, f64) {
         match point_type {
             "VORDME" | "NDB" => resolve_cached_coordinates(
                 &self.geodesic,
@@ -385,7 +448,9 @@ fn load_coordinate_candidates(
     let ident_list = idents.iter().collect::<Vec<_>>();
 
     for chunk in ident_list.chunks(IDENT_QUERY_CHUNK_SIZE) {
-        let placeholders = std::iter::repeat_n("?", chunk.len()).collect::<Vec<_>>().join(", ");
+        let placeholders = std::iter::repeat_n("?", chunk.len())
+            .collect::<Vec<_>>()
+            .join(", ");
         let query = format!(
             "SELECT Ident, Latitude, Longtitude FROM {table_name} WHERE Ident IN ({placeholders})"
         );
@@ -401,7 +466,10 @@ fn load_coordinate_candidates(
 
         for row in rows {
             let (ident, latitude, longitude) = row?;
-            candidates.entry(ident).or_default().push((latitude, longitude));
+            candidates
+                .entry(ident)
+                .or_default()
+                .push((latitude, longitude));
         }
     }
 
@@ -416,14 +484,30 @@ fn read_file_to_dict(file_path: &Path) -> Result<BTreeMap<String, Vec<RouteLine>
         let Some(record) = parse_route_record(line) else {
             continue;
         };
-        dict.entry(record.route_ident.to_string()).or_insert_with(Vec::new).push(RouteLine {
-            segment_number: record.segment_number.parse().unwrap_or_default(),
-            fix_ident: record.fix_ident.to_string(),
-            latitude: record.latitude.to_string(),
-            longitude: record.longitude.to_string(),
-        });
+        dict.entry(record.route_ident.to_string())
+            .or_insert_with(Vec::new)
+            .push(RouteLine {
+                segment_number: record.segment_number.parse().unwrap_or_default(),
+                fix_ident: record.fix_ident.to_string(),
+                latitude: record.latitude.to_string(),
+                longitude: record.longitude.to_string(),
+            });
     }
     Ok(dict)
+}
+
+fn read_route_preamble(file_path: &Path) -> Result<String> {
+    let contents = fs::read_to_string(file_path)
+        .with_context(|| format!("无法读取航路文件头: {}", file_path.display()))?;
+    let lines = contents
+        .lines()
+        .take_while(|line| parse_route_record(line).is_none())
+        .collect::<Vec<_>>();
+    if lines.is_empty() {
+        Ok(String::new())
+    } else {
+        Ok(format!("{}\n", lines.join("\n")))
+    }
 }
 
 struct GeneratedRouteData {
@@ -500,11 +584,7 @@ fn write_route_line(buffer: &mut String, route_ident: &str, segment: &RouteLine)
     let _ = writeln!(
         buffer,
         "{} {:03} {} {} {}",
-        route_ident,
-        segment.segment_number,
-        segment.fix_ident,
-        segment.latitude,
-        segment.longitude,
+        route_ident, segment.segment_number, segment.fix_ident, segment.latitude, segment.longitude,
     );
 }
 
@@ -548,8 +628,10 @@ fn filter_checked_routes(
         if route_ident.starts_with("XX") {
             continue;
         }
-        if matches!(route_ident.chars().next(), Some('A' | 'B' | 'G' | 'L' | 'M' | 'R' | 'V' | 'W'))
-            && !naip_route_idents.contains(&route_ident)
+        if matches!(
+            route_ident.chars().next(),
+            Some('A' | 'B' | 'G' | 'L' | 'M' | 'R' | 'V' | 'W')
+        ) && !naip_route_idents.contains(&route_ident)
         {
             continue;
         }
@@ -572,9 +654,9 @@ fn compare_and_insert(
             let first_match = file1_segments
                 .iter()
                 .position(|segment| segment.fix_ident == file2_segments[0].fix_ident);
-            let last_match = file1_segments
-                .iter()
-                .rposition(|segment| segment.fix_ident == file2_segments[file2_segments.len() - 1].fix_ident);
+            let last_match = file1_segments.iter().rposition(|segment| {
+                segment.fix_ident == file2_segments[file2_segments.len() - 1].fix_ident
+            });
 
             if let (Some(start_index), Some(end_index)) = (first_match, last_match) {
                 if start_index <= end_index {
@@ -591,20 +673,19 @@ fn compare_and_insert(
     }
 }
 
-fn save_route_dict(file_path: &Path, dict: &BTreeMap<String, Vec<RouteLine>>) -> Result<()> {
+fn save_route_dict(
+    file_path: &Path,
+    preamble: &str,
+    dict: &BTreeMap<String, Vec<RouteLine>>,
+) -> Result<()> {
     let estimated_line_count: usize = dict.values().map(Vec::len).sum();
     let mut output = String::with_capacity(estimated_line_count.saturating_mul(40));
+    output.push_str(preamble);
     for (route_ident, segments) in dict {
         for segment in segments {
             write_route_line(&mut output, route_ident, segment);
         }
     }
     crate::common::write_text_file(file_path, &output)?;
-    Ok(())
-}
-
-fn save_sample_to_file(file_path: &Path) -> Result<()> {
-    let sample_text = ";Supplemental Navaid Database (Option)\n;;\n;Data format is same as P3D_root\\iFly\\737MAX\\navdata\\\n;;\n;If any route in this file have same identifier as in\n;Main Navaid Database, FMC will delete route data in\n;the Main Navaid Database\n;;\n;This is a sample file\n;-------------------------------------------------------------\nTEST 001 TEST1 33.114350 139.788483\nTEST 002 TEST2 33.193211 138.972397\nTEST 003 TEST3 33.447742 135.794495\n";
-    crate::common::write_text_file(file_path, sample_text)?;
     Ok(())
 }
