@@ -966,13 +966,13 @@ fn write_list_file(
 
 fn terminal_output_path(icao: &str, proc_code: &str, navdata_path: &Path) -> Option<PathBuf> {
     match proc_code {
-        "2" => Some(
+        "1" => Some(
             navdata_path
                 .join("Supplemental")
                 .join("Sid")
                 .join(format!("{icao}.sid")),
         ),
-        "1" => Some(
+        "2" => Some(
             navdata_path
                 .join("Supplemental")
                 .join("Star")
@@ -1299,8 +1299,8 @@ fn transition_file_code(row: &MergedLeg) -> Option<&'static str> {
 
 fn transition_file_code_values(proc_code: &str, type_code: &str) -> Option<&'static str> {
     match (proc_code, type_code) {
-        ("1", "1" | "4") => Some("4"),
-        ("2", "3" | "6") => Some("6"),
+        ("1", "1" | "4") => Some("6"),
+        ("2", "3" | "6") => Some("4"),
         ("3", "A") => Some("A"),
         _ => None,
     }
@@ -1504,15 +1504,32 @@ fn build_runway_ident(terminal_value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::transition_file_code_values;
+    use super::{terminal_output_path, transition_file_code_values};
 
     #[test]
     fn maps_all_ifly_transition_families() {
-        assert_eq!(transition_file_code_values("1", "1"), Some("4"));
-        assert_eq!(transition_file_code_values("1", "4"), Some("4"));
-        assert_eq!(transition_file_code_values("2", "3"), Some("6"));
-        assert_eq!(transition_file_code_values("2", "6"), Some("6"));
+        assert_eq!(transition_file_code_values("1", "1"), Some("6"));
+        assert_eq!(transition_file_code_values("1", "4"), Some("6"));
+        assert_eq!(transition_file_code_values("2", "3"), Some("4"));
+        assert_eq!(transition_file_code_values("2", "6"), Some("4"));
         assert_eq!(transition_file_code_values("3", "A"), Some("A"));
         assert_eq!(transition_file_code_values("1", "2"), None);
+    }
+
+    #[test]
+    fn maps_fenix_base_procedures_to_ifly_files() {
+        let root = std::path::Path::new("navdata");
+        assert_eq!(
+            terminal_output_path("ZHXF", "1", root),
+            Some(root.join("Supplemental/Sid/ZHXF.sid"))
+        );
+        assert_eq!(
+            terminal_output_path("ZUZH", "2", root),
+            Some(root.join("Supplemental/Star/ZUZH.star"))
+        );
+        assert_eq!(
+            terminal_output_path("ZBCF", "3", root),
+            Some(root.join("Supplemental/Star/ZBCF.app"))
+        );
     }
 }
