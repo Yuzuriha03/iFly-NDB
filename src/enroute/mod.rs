@@ -261,12 +261,13 @@ fn append_wpnavapt_row(buffer: &mut String, task: &RunwayTask, declination: f64)
         .unwrap_or_default();
     let runway_length = task.length.round().to_i64().unwrap_or_default();
     let runway_elevation = task.elevation.round().to_i64().unwrap_or_default();
+    // iFly reserves three bytes for the runway identifier.
+    let runway_ident = fixed_width_text(&task.ident, 3);
     let _ = writeln!(
         buffer,
-        "{:<24}{}{: <3}{:05}{:03}{:>10.6}{:>11.6}{}{:03}{:05}",
+        "{:<24}{}{runway_ident}{:05}{:03}{:>10.6}{:>11.6}{}{:03}{:05}",
         fixed_width_text(&task.airport_name, 24),
         task.icao,
-        task.ident,
         runway_length,
         magnetic_heading,
         task.latitude,
@@ -489,6 +490,24 @@ mod tests {
         let runway = runway.trim_end_matches('\n');
         assert_eq!(runway.len(), 74);
         assert!(runway.starts_with("JAMES ARMSTRONG RICHARD"));
+
+        let mut overlong = String::new();
+        append_wpnavapt_row(
+            &mut overlong,
+            &RunwayTask {
+                airport_name: "TEST".to_string(),
+                icao: "ZXXX".to_string(),
+                ident: "18L-EXTENDED".to_string(),
+                length: 10_000.0,
+                latitude: 1.0,
+                longitude: 2.0,
+                true_heading: 180.0,
+                frequency: "000.00".to_string(),
+                elevation: 100.0,
+            },
+            0.0,
+        );
+        assert_eq!(overlong.trim_end_matches('\n').len(), 74);
     }
 
     #[test]

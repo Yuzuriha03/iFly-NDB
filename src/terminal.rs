@@ -1504,7 +1504,7 @@ fn build_runway_ident(terminal_value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::transition_file_code_values;
+    use super::{terminal_output_path, transition_file_code_values};
 
     #[test]
     fn maps_all_ifly_transition_families() {
@@ -1514,5 +1514,22 @@ mod tests {
         assert_eq!(transition_file_code_values("2", "6"), Some("6"));
         assert_eq!(transition_file_code_values("3", "A"), Some("A"));
         assert_eq!(transition_file_code_values("1", "2"), None);
+    }
+
+    #[test]
+    fn maps_fenix_base_procedures_to_ifly_files() {
+        let root = std::path::Path::new("navdata");
+        assert_eq!(
+            terminal_output_path("ZWTK", "2", root),
+            Some(root.join("Supplemental/Sid/ZWTK.sid"))
+        );
+        assert_eq!(
+            terminal_output_path("ZUZH", "1", root),
+            Some(root.join("Supplemental/Star/ZUZH.star"))
+        );
+        assert_eq!(
+            terminal_output_path("ZBCF", "3", root),
+            Some(root.join("Supplemental/Star/ZBCF.app"))
+        );
     }
 }

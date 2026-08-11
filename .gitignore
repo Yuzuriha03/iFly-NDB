@@ -10,6 +10,7 @@ PySrc/Terminal/__pycache__
 PySrc/Enroute/__pycache__
 PySrc/Enroute/Route/__pycache__
 /target
+/target-test
 *.ps1
 /debug
 /reports
