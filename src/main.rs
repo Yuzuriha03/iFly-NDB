@@ -9,7 +9,7 @@ use rayon::prelude::*;
 use rayon::ThreadPoolBuilder;
 use rusqlite::Connection;
 
-use ifly_ndb_converter::{common, enroute, terminal, validation};
+use ifly_ndb_converter::{altitude, common, enroute, terminal, validation};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -36,6 +36,12 @@ struct Cli {
     /// Last Fenix Terminal ID to convert (inclusive).
     #[arg(long)]
     end_terminal_id: Option<i64>,
+    /// A UTF-8 altitude correction file: procedure_file|section|altitude.
+    #[arg(long)]
+    altitude_overrides: Option<PathBuf>,
+    /// Open the desktop conversion page instead of running the CLI directly.
+    #[arg(long)]
+    gui: bool,
     /// Do not update MSFS 2020 layout.json and manifest.json.
     #[arg(long)]
     skip_layout_update: bool,
@@ -56,6 +62,10 @@ fn main() {
 
 fn run() -> Result<()> {
     let cli = Cli::parse();
+
+    if cli.gui {
+        return gui::launch();
+    }
 
     let db_path = resolve_db_path(cli.db_path)?;
 
@@ -108,6 +118,7 @@ fn run() -> Result<()> {
                 prepared_enroute.as_deref(),
                 prepared_terminal.as_ref(),
                 cli.skip_layout_update,
+                cli.altitude_overrides.as_deref(),
             )?;
         }
     } else {
@@ -125,6 +136,7 @@ fn run() -> Result<()> {
                         prepared_enroute.as_deref(),
                         prepared_terminal.as_ref(),
                         cli.skip_layout_update,
+                        cli.altitude_overrides.as_deref(),
                     )
                 })
                 .collect::<Vec<_>>()
@@ -233,6 +245,7 @@ fn process_navdata_target(
     prepared_enroute: Option<&enroute::PreparedEnrouteData>,
     prepared_terminals: &terminal::PreparedTerminalData,
     skip_layout_update: bool,
+    altitude_overrides: Option<&std::path::Path>,
 ) -> Result<()> {
     let target_label = target.source_label.as_str();
 
@@ -247,6 +260,11 @@ fn process_navdata_target(
 
     terminal::write_prepared(prepared_terminals, &target.navdata_path)
         .with_context(|| format!("处理 Terminal 失败: {}", target.navdata_path.display()))?;
+    if let Some(override_path) = altitude_overrides {
+        let count = altitude::apply_file(&target.navdata_path, override_path)
+            .with_context(|| format!("应用高度修正失败: {}", override_path.display()))?;
+        println!("[{target_label}] 已应用 {count} 条高度修正");
+    }
     println!("[{target_label}] Terminal数据转换完毕");
 
     common::sync_supplemental_ident(&target.navdata_path, prepared_terminals.revision())?;
@@ -256,6 +274,8 @@ fn process_navdata_target(
     }
     Ok(())
 }
+
+mod gui;
 
 fn directory_worker_count(target_count: usize) -> usize {
     if target_count <= 1 {

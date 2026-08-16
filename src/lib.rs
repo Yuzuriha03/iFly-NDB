@@ -1,5 +1,6 @@
 //! Fenix to iFly navdata conversion library.
 
+pub mod altitude;
 pub mod common;
 pub mod enroute;
 pub mod geomag;
