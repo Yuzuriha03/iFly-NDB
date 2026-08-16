@@ -14,3 +14,4 @@ PySrc/Enroute/Route/__pycache__
 *.ps1
 /debug
 /reports
+/output/

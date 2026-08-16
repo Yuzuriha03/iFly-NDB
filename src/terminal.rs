@@ -10,7 +10,8 @@ use num_traits::ToPrimitive;
 use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::common::{
-    opt_string_from_f64, row_opt_f64, row_opt_i64, row_opt_string, row_string, trimmed_float,
+    fenix_airac_cycle, opt_string_from_f64, row_opt_f64, row_opt_i64, row_opt_string, row_string,
+    trimmed_float,
 };
 
 type SharedText = Arc<str>;
@@ -1444,11 +1445,7 @@ fn get_revision_code_from_config(conn: &Connection) -> Result<String> {
         .context("无法读取 Fenix config.CycleName")?
         .flatten()
         .context("Fenix config 缺少 CycleName")?;
-    let revision = value.trim().to_string();
-    if revision.len() != 4 || !revision.chars().all(|character| character.is_ascii_digit()) {
-        anyhow::bail!("Fenix config.CycleName 无效: {revision:?}");
-    }
-    Ok(revision)
+    fenix_airac_cycle(&value)
 }
 
 fn join_i64_values(values: &[i64]) -> String {
@@ -1504,7 +1501,9 @@ fn build_runway_ident(terminal_value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{terminal_output_path, transition_file_code_values};
+    use rusqlite::Connection;
+
+    use super::{get_revision_code_from_config, terminal_output_path, transition_file_code_values};
 
     #[test]
     fn maps_all_ifly_transition_families() {
@@ -1531,5 +1530,17 @@ mod tests {
             terminal_output_path("ZBCF", "3", root),
             Some(root.join("Supplemental/Star/ZBCF.app"))
         );
+    }
+
+    #[test]
+    fn accepts_fenix_cycle_name_with_revision_suffix() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE config (key TEXT PRIMARY KEY, val TEXT);
+             INSERT INTO config (key, val) VALUES ('CycleName', '2608n1');",
+        )
+        .unwrap();
+
+        assert_eq!(get_revision_code_from_config(&conn).unwrap(), "2608");
     }
 }

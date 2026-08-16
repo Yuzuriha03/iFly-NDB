@@ -385,12 +385,9 @@ fn write_optional_supplemental_file(
     let output_folder = navdata_path.join("Supplemental");
     let output_file = output_folder.join(file_name);
     let Some(contents) = contents.filter(|contents| !contents.trim().is_empty()) else {
-        if output_file.exists()
-            && fs::read_to_string(&output_file).is_ok_and(|existing| existing.trim().is_empty())
-        {
-            fs::remove_file(&output_file)
-                .with_context(|| format!("无法删除空的增量文件 {}", output_file.display()))?;
-        }
+        // A missing incremental dataset must never delete a user's existing
+        // supplemental file. It may contain manual corrections from a prior
+        // AIRAC conversion.
         return Ok(());
     };
     fs::create_dir_all(&output_folder)?;
@@ -441,7 +438,7 @@ fn fixed_width_text(text: &str, len: usize) -> String {
 mod tests {
     use super::{
         append_navaid_row, append_wpnavapt_row, fixed_width_text, format_ils_frequency,
-        normalized_supp_value, NavaidRow, RunwayTask,
+        normalized_supp_value, write_optional_supplemental_file, NavaidRow, RunwayTask,
     };
 
     #[test]
@@ -524,6 +521,22 @@ mod tests {
         assert_eq!(
             fixed_width_text("ABCDEFGHIJKLMNOPQRSTUVWXYZ", 24),
             "ABCDEFGHIJKLMNOPQRSTUVWX"
+        );
+    }
+
+    #[test]
+    fn preserves_existing_wpn_file_when_current_batch_has_no_records() {
+        let root =
+            std::env::temp_dir().join(format!("ifly-ndb-preserve-wpn-{}", std::process::id()));
+        let file = root.join("Supplemental").join("WPNAVFIX.txt");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, "manual correction\r\n").unwrap();
+
+        write_optional_supplemental_file(&root, "WPNAVFIX.txt", None).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(file).unwrap(),
+            "manual correction\r\n"
         );
     }
 }

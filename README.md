@@ -9,6 +9,9 @@ NAIP airway changes are merged into `Permanent/WPNAVRTE.txt`; its vendor header
 is preserved and the original file is saved once as
 `WPNAVRTE.txt.ifly-ndb.bak`.
 
+Existing supplemental `WPNAVAPT.txt`, `WPNAVAID.txt`, and `WPNAVFIX.txt` files
+are never removed when a source batch contains no corresponding records.
+
 ## Requirements
 
 - Rust 1.85 or newer (only needed when building from source)
@@ -37,9 +40,11 @@ Validation checks:
 - matching iFly `cycle.json` and `FMC_Ident.txt` metadata;
 - required Permanent files and procedure directories;
 - CRLF/fixed-width airport, runway, navaid, and fix records;
-- airport, runway, navaid/ILS, route, and procedure record counts.
+- nonempty fix/route data and the required permanent procedure files.
 
 The command fails rather than combining different AIRAC cycles.
+Fenix `CycleName` values with a revision suffix, such as `2608n1`, are
+validated against the four-digit AIRAC cycle (`2608`) required by iFly.
 
 ## Convert
 
@@ -64,11 +69,39 @@ boundary are treated as additions. A stock database whose boundary is already
 the final row is valid: it produces no terminal overlay and never creates empty
 database files.
 
+## Desktop page
+
+Launch the same executable with:
+
+```text
+ifly_ndb_converter --gui
+```
+
+The desktop page selects the Fenix database, NAIP CSV, and iFly `navdata`
+directory; it can also run an explicit Terminal ID range in successive batches.
+The page invokes the normal CLI for each batch, so output semantics and
+validation are identical to command-line use. A selected altitude correction
+file is applied after the final batch, once all requested procedure files exist.
+
+## Altitude corrections
+
+Use `--altitude-overrides corrections.txt` to apply deterministic corrections
+after terminal files are converted. Each non-comment line is:
+
+```text
+relative_procedure_file|section_header_without_brackets|altitude
+SID/ZWTK.sid|DSC3Z.33.1|6000
+```
+
+The correction replaces an existing `Altitude=` value in that exact section or
+inserts one if the Fenix source omitted it. Keep cycle-specific correction files
+outside the repository and select them from the desktop page when needed.
+
 ## Current iFly format guarantees
 
 - Text output uses CRLF line endings.
-- Empty `AIRPORTS.dat`, `WPNAVAPT.txt`, `WPNAVAID.txt`, and `WPNAVFIX.txt`
-  overlays are not installed.
+- Empty source batches preserve existing `WPNAVAPT.txt`, `WPNAVAID.txt`, and
+  `WPNAVFIX.txt` overlays instead of deleting manual corrections.
 - Supplemental `FMC_Ident.txt` uses `config.CycleName` from the selected DB.
 - SID, SID-transition, STAR, STAR-transition, approach, and
   approach-transition file families are supported.
