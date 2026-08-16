@@ -48,15 +48,19 @@ struct Cli {
 }
 
 fn main() {
-    if let Err(error) = run() {
-        eprintln!("{error:#}");
+    let cli = Cli::parse();
+    let no_countdown = cli.no_countdown;
+
+    if let Err(error) = run(cli) {
+        eprintln!("处理失败: {error:#}");
+        if !no_countdown {
+            common::countdown_timer(10);
+        }
         std::process::exit(1);
     }
 }
 
-fn run() -> Result<()> {
-    let cli = Cli::parse();
-
+fn run(cli: Cli) -> Result<()> {
     let db_path = resolve_db_path(cli.db_path)?;
 
     if cli.validate_only {

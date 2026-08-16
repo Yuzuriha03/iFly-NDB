@@ -385,7 +385,7 @@ fn auto_detect_route_file() -> Result<Vec<NavdataTarget>> {
         ),
         (
             "MSFS2020 (Steam)",
-            expand_env(r"%AppData%\Roaming\Microsoft Flight Simulator\UserCfg.opt"),
+            msfs_2020_steam_user_cfg(&expand_env(r"%AppData%")),
         ),
     ];
 
@@ -450,6 +450,12 @@ fn auto_detect_route_file() -> Result<Vec<NavdataTarget>> {
         .collect())
 }
 
+fn msfs_2020_steam_user_cfg(appdata: &Path) -> PathBuf {
+    appdata
+        .join("Microsoft Flight Simulator")
+        .join("UserCfg.opt")
+}
+
 fn expand_env(input: &str) -> PathBuf {
     let env_map: HashMap<String, String> = std::env::vars()
         .map(|(name, value)| (name.to_ascii_lowercase(), value))
@@ -493,7 +499,19 @@ fn extract_quoted_value(line: &str) -> Option<String> {
 mod tests {
     use std::path::Path;
 
-    use super::{normalize_navdata_root, resolve_terminal_range, to_crlf};
+    use super::{
+        msfs_2020_steam_user_cfg, normalize_navdata_root, resolve_terminal_range, to_crlf,
+    };
+
+    #[test]
+    fn steam_user_cfg_does_not_duplicate_roaming() {
+        assert_eq!(
+            msfs_2020_steam_user_cfg(Path::new(r"C:\Users\pilot\AppData\Roaming")),
+            Path::new(r"C:\Users\pilot\AppData\Roaming")
+                .join("Microsoft Flight Simulator")
+                .join("UserCfg.opt")
+        );
+    }
 
     #[test]
     fn accepts_navdata_root_or_permanent_child() {

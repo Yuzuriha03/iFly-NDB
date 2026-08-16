@@ -36,7 +36,8 @@ fn shared_model() -> Result<&'static MagneticModel> {
         model_path
             .to_str()
             .ok_or_else(|| anyhow::anyhow!("invalid geomag model path"))?,
-    );
+    )
+    .map_err(|error| anyhow::anyhow!("unable to initialize geomag model: {error}"))?;
     let _ = MODEL.set(model);
     Ok(MODEL.get().expect("magnetic model initialized"))
 }
@@ -46,10 +47,8 @@ fn ensure_model_file() -> Result<&'static PathBuf> {
         return Ok(path);
     }
     let file_path = std::env::temp_dir().join("ifly_ndb_converter_wmmhr_2025.cof");
-    if !file_path.exists() {
-        fs::write(&file_path, WMM_HIGH_RESOLUTION)
-            .with_context(|| format!("unable to write WMM model to {}", file_path.display()))?;
-    }
+    fs::write(&file_path, WMM_HIGH_RESOLUTION)
+        .with_context(|| format!("unable to write WMM model to {}", file_path.display()))?;
     let _ = MODEL_PATH.set(file_path);
     Ok(MODEL_PATH.get().expect("model path initialized"))
 }

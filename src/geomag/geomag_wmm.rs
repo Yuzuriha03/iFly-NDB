@@ -1,5 +1,6 @@
+use std::fs;
 use std::io::{BufRead, BufReader};
-use std::{fs, process};
+use std::str::FromStr;
 
 const WMM_VALIDITY_RANGE: f64 = 5.0;
 const EQUATORIAL_RADIUS: f64 = 6_378_137.0;
@@ -286,92 +287,104 @@ impl MagneticModel {
     }
 }
 
-pub fn initialise_magnetic_model(path: &str) -> MagneticModel {
-    let model_file = fs::File::open(path).expect("Model file not found!");
+pub fn initialise_magnetic_model(path: &str) -> Result<MagneticModel, String> {
+    let model_file =
+        fs::File::open(path).map_err(|error| format!("unable to open model file: {error}"))?;
     let mut model_file = BufReader::new(model_file).lines();
 
     let from_year = model_file
         .next()
-        .expect("Model file is empty!")
-        .expect("Error reading model file!")
+        .ok_or_else(|| "model file is empty".to_string())?
+        .map_err(|error| format!("unable to read model header: {error}"))?
         .split_whitespace()
         .next()
-        .expect("Error parsing model file!")
+        .ok_or_else(|| "model header does not contain a year".to_string())?
         .parse::<f64>()
-        .expect("Error parsing model file!");
+        .map_err(|error| format!("invalid model year: {error}"))?;
 
     let mut g = [[0.0; COEFF_LEN]; COEFF_LEN];
     let mut h = [[0.0; COEFF_LEN]; COEFF_LEN];
     let mut g_sv = [[0.0; COEFF_LEN]; COEFF_LEN];
     let mut h_sv = [[0.0; COEFF_LEN]; COEFF_LEN];
-    for line in model_file {
-        match line {
-            Ok(line) => {
-                if line.starts_with("9999") {
-                    break;
-                }
+    for (index, line) in model_file.enumerate() {
+        let line_number = index + 2;
+        let line =
+            line.map_err(|error| format!("unable to read model line {line_number}: {error}"))?;
+        if line.starts_with("9999") {
+            break;
+        }
 
-                let mut line = line.split_whitespace();
+        let mut fields = line.split_whitespace();
+        let n_line: usize = parse_model_field(fields.next(), line_number, "degree")?;
+        let m_line: usize = parse_model_field(fields.next(), line_number, "order")?;
+        let g_line: f64 = parse_model_field(fields.next(), line_number, "g")?;
+        let h_line: f64 = parse_model_field(fields.next(), line_number, "h")?;
+        let g_sv_line: f64 = parse_model_field(fields.next(), line_number, "g_sv")?;
+        let h_sv_line: f64 = parse_model_field(fields.next(), line_number, "h_sv")?;
 
-                let n_line: usize = line
-                    .next()
-                    .expect("Error parsing model file!")
-                    .parse()
-                    .expect("Error parsing model file!");
-                let m_line: usize = line
-                    .next()
-                    .expect("Error parsing model file!")
-                    .parse()
-                    .expect("Error parsing model file!");
-                let g_line: f64 = line
-                    .next()
-                    .expect("Error parsing model file!")
-                    .parse()
-                    .expect("Error parsing model file!");
-                let h_line: f64 = line
-                    .next()
-                    .expect("Error parsing model file!")
-                    .parse()
-                    .expect("Error parsing model file!");
-                let g_sv_line: f64 = line
-                    .next()
-                    .expect("Error parsing model file!")
-                    .parse()
-                    .expect("Error parsing model file!");
-                let h_sv_line: f64 = line
-                    .next()
-                    .expect("Error parsing model file!")
-                    .parse()
-                    .expect("Error parsing model file!");
+        if n_line > MAX_DEGREE {
+            break;
+        }
+        if m_line > n_line {
+            return Err(format!(
+                "invalid model line {line_number}: order {m_line} exceeds degree {n_line}"
+            ));
+        }
 
-                if n_line > MAX_DEGREE {
-                    break;
-                }
+        g[n_line][m_line] = g_line;
+        g_sv[n_line][m_line] = g_sv_line;
 
-                if m_line > n_line {
-                    eprintln!("Corrupt record in model file!");
-                    process::exit(1);
-                }
-
-                g[n_line][m_line] = g_line;
-                g_sv[n_line][m_line] = g_sv_line;
-
-                if m_line != 0 {
-                    h[n_line][m_line] = h_line;
-                    h_sv[n_line][m_line] = h_sv_line;
-                }
-            }
-            Err(e) => {
-                eprintln!("Error reading model file: {e:?}");
-            }
+        if m_line != 0 {
+            h[n_line][m_line] = h_line;
+            h_sv[n_line][m_line] = h_sv_line;
         }
     }
 
-    MagneticModel {
+    Ok(MagneticModel {
         from_year,
         g,
         h,
         g_sv,
         h_sv,
+    })
+}
+
+fn parse_model_field<T>(
+    field: Option<&str>,
+    line_number: usize,
+    field_name: &str,
+) -> Result<T, String>
+where
+    T: FromStr,
+    T::Err: std::fmt::Display,
+{
+    field
+        .ok_or_else(|| format!("model line {line_number} is missing {field_name}"))?
+        .parse()
+        .map_err(|error| format!("invalid {field_name} on model line {line_number}: {error}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use super::initialise_magnetic_model;
+
+    #[test]
+    fn corrupt_model_returns_an_error_instead_of_exiting() {
+        let path = std::env::temp_dir().join(format!(
+            "ifly_ndb_converter_invalid_model_{}.cof",
+            std::process::id()
+        ));
+        fs::write(&path, "2025.0 TEST\n1 2 0.0 0.0 0.0 0.0\n9999\n")
+            .expect("write invalid model fixture");
+
+        let result = initialise_magnetic_model(path.to_string_lossy().as_ref());
+        let _ = fs::remove_file(path);
+
+        match result {
+            Ok(_) => panic!("corrupt model unexpectedly initialized"),
+            Err(error) => assert!(error.contains("order 2 exceeds degree 1")),
+        }
     }
 }
