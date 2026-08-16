@@ -57,20 +57,6 @@ pub fn validate_reference_dataset(db_path: &Path, navdata_path: &Path) -> Result
     let _gls_records = validate_fixed_file(&permanent.join("WPNAVGLS.txt"), 1, 256)?;
     let route_records = validate_route_file(&permanent.join("WPNAVRTE.txt"))?;
 
-    compare_count(&conn, "Airports", airport_records, "AIRPORTS.dat")?;
-    let source_runways = table_count(&conn, "Runways")?;
-    let source_ils = table_count(&conn, "ILSes")?;
-    if runway_records < source_runways || runway_records > source_runways + source_ils {
-        bail!(
-            "WPNAVAPT.txt 记录数异常：{runway_records}，Fenix Runways={source_runways}, ILSes={source_ils}"
-        );
-    }
-    let expected_navaids = table_count(&conn, "Navaids")? + source_ils;
-    if navaid_records != expected_navaids {
-        bail!(
-            "WPNAVAID.txt 记录数不匹配：iFly={navaid_records}, Fenix Navaids+ILSes={expected_navaids}"
-        );
-    }
     if fix_records == 0 || route_records == 0 {
         bail!("iFly fix/route 数据为空");
     }
@@ -110,11 +96,7 @@ fn source_cycle(conn: &Connection) -> Result<String> {
             |row| row.get(0),
         )
         .context("Fenix config 缺少 CycleName")?;
-    let cycle = cycle.trim().to_string();
-    if cycle.len() != 4 || !cycle.chars().all(|character| character.is_ascii_digit()) {
-        bail!("Fenix CycleName 无效: {cycle:?}");
-    }
-    Ok(cycle)
+    common::fenix_airac_cycle(&cycle)
 }
 
 fn validate_destination_cycle(permanent: &Path, expected_cycle: &str) -> Result<()> {
@@ -191,22 +173,6 @@ fn validate_route_file(path: &Path) -> Result<usize> {
     Ok(records)
 }
 
-fn compare_count(conn: &Connection, table: &str, actual: usize, label: &str) -> Result<()> {
-    let expected = table_count(conn, table)?;
-    if actual != expected {
-        bail!("{label} 记录数不匹配：iFly={actual}, Fenix {table}={expected}");
-    }
-    Ok(())
-}
-
-fn table_count(conn: &Connection, table: &str) -> Result<usize> {
-    let sql = format!("SELECT COUNT(*) FROM {table}");
-    let count: i64 = conn
-        .query_row(&sql, [], |row| row.get(0))
-        .with_context(|| format!("无法统计 Fenix {table}"))?;
-    usize::try_from(count).with_context(|| format!("Fenix {table} 记录数无效: {count}"))
-}
-
 fn count_procedure_files(permanent: &Path) -> Result<usize> {
     let mut count = 0usize;
     for directory in [permanent.join("Sid"), permanent.join("Star")] {
@@ -226,4 +192,96 @@ fn count_procedure_files(permanent: &Path) -> Result<usize> {
         bail!("缺少机场补充目录: {}", permanent.join("Supp").display());
     }
     Ok(count)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use rusqlite::Connection;
+
+    use super::{source_cycle, validate_reference_dataset};
+
+    #[test]
+    fn accepts_fenix_cycle_name_with_revision_suffix() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE config (key TEXT PRIMARY KEY, val TEXT);
+             INSERT INTO config (key, val) VALUES ('CycleName', '2608n1');",
+        )
+        .unwrap();
+
+        assert_eq!(source_cycle(&conn).unwrap(), "2608");
+    }
+
+    #[test]
+    fn accepts_a_valid_ifly_baseline_with_different_vendor_record_counts() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "ifly_ndb_validation_vendor_count_mismatch_{}_{}",
+            std::process::id(),
+            unique
+        ));
+        let permanent = root.join("navdata/Permanent");
+        fs::create_dir_all(permanent.join("Sid")).unwrap();
+        fs::create_dir_all(permanent.join("Star")).unwrap();
+        fs::create_dir_all(permanent.join("Supp")).unwrap();
+        fs::write(
+            permanent.join("cycle.json"),
+            r#"{"cycle":"2608","revision":"1"}"#,
+        )
+        .unwrap();
+        fs::write(
+            permanent.join("FMC_Ident.txt"),
+            "[Ident]\r\nNavData=AIRAC-2608\r\n",
+        )
+        .unwrap();
+        fs::write(permanent.join("AIRPORTS.dat"), "A".repeat(25) + "\r\n").unwrap();
+        fs::write(permanent.join("WPNAVAPT.txt"), "A".repeat(74) + "\r\n").unwrap();
+        fs::write(permanent.join("WPNAVAID.txt"), "A".repeat(61) + "\r\n").unwrap();
+        fs::write(permanent.join("WPNAVFIX.txt"), "A".repeat(50) + "\r\n").unwrap();
+        fs::write(permanent.join("WPNAVGLS.txt"), "A\r\n").unwrap();
+        fs::write(permanent.join("WPNAVRTE.txt"), "RTE 1 FIX 1.0 2.0\r\n").unwrap();
+        fs::write(permanent.join("Sid/TEST.sid"), "[Procedure]\r\n").unwrap();
+
+        let db_path = root.join("source.db3");
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE config (key TEXT PRIMARY KEY, val TEXT);
+             INSERT INTO config (key, val) VALUES ('CycleName', '2608n1');
+             CREATE TABLE Airports (ID INTEGER);
+             INSERT INTO Airports VALUES (1), (2);
+             CREATE TABLE Runways (ID INTEGER);
+             CREATE TABLE ILSes (ID INTEGER);
+             CREATE TABLE Navaids (ID INTEGER);
+             CREATE TABLE AirportCommunication (ID INTEGER);
+             CREATE TABLE AirportLookup (ID INTEGER);
+             CREATE TABLE AirwayLegs (ID INTEGER);
+             CREATE TABLE Airways (ID INTEGER);
+             CREATE TABLE Gls (ID INTEGER);
+             CREATE TABLE GridMora (ID INTEGER);
+             CREATE TABLE Holdings (ID INTEGER);
+             CREATE TABLE Markers (ID INTEGER);
+             CREATE TABLE MarkerTypes (ID INTEGER);
+             CREATE TABLE NavaidLookup (ID INTEGER);
+             CREATE TABLE NavaidTypes (ID INTEGER);
+             CREATE TABLE SurfaceTypes (ID INTEGER);
+             CREATE TABLE TerminalLegs (ID INTEGER);
+             CREATE TABLE TerminalLegsEx (ID INTEGER);
+             CREATE TABLE Terminals (ID INTEGER);
+             CREATE TABLE TrmLegTypes (ID INTEGER);
+             CREATE TABLE WaypointLookup (ID INTEGER);
+             CREATE TABLE Waypoints (ID INTEGER);",
+        )
+        .unwrap();
+        drop(conn);
+
+        let result = validate_reference_dataset(&db_path, &root.join("navdata"));
+        fs::remove_dir_all(root).unwrap();
+        result.unwrap();
+    }
 }

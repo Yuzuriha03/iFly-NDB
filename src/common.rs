@@ -222,6 +222,35 @@ pub fn resolve_terminal_range(
     }
 }
 
+/// Extract the four-digit AIRAC cycle from Fenix's `config.CycleName`.
+///
+/// Current Fenix datasets may append a revision marker such as `n1` to the
+/// actual cycle (`2608n1`). iFly's metadata accepts the four-digit cycle only.
+pub fn fenix_airac_cycle(cycle_name: &str) -> Result<String> {
+    let cycle_name = cycle_name.trim();
+    let Some((cycle, suffix)) = cycle_name
+        .get(..4)
+        .zip(cycle_name.get(4..))
+        .filter(|(cycle, _)| cycle.chars().all(|character| character.is_ascii_digit()))
+    else {
+        bail!("Fenix CycleName 无效: {cycle_name:?}");
+    };
+
+    if !suffix.is_empty()
+        && (!suffix
+            .chars()
+            .next()
+            .is_some_and(|character| character.is_ascii_alphabetic())
+            || !suffix
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric()))
+    {
+        bail!("Fenix CycleName 无效: {cycle_name:?}");
+    }
+
+    Ok(cycle.to_string())
+}
+
 pub fn update_layout_json(navdata_path: &Path) -> Result<()> {
     let package_root = navdata_path
         .parent()
@@ -493,7 +522,7 @@ fn extract_quoted_value(line: &str) -> Option<String> {
 mod tests {
     use std::path::Path;
 
-    use super::{normalize_navdata_root, resolve_terminal_range, to_crlf};
+    use super::{fenix_airac_cycle, normalize_navdata_root, resolve_terminal_range, to_crlf};
 
     #[test]
     fn accepts_navdata_root_or_permanent_child() {
@@ -519,5 +548,13 @@ mod tests {
     #[test]
     fn normalizes_line_endings() {
         assert_eq!(to_crlf("one\ntwo\r\n"), "one\r\ntwo\r\n");
+    }
+
+    #[test]
+    fn extracts_airac_cycle_from_fenix_revision_suffix() {
+        assert_eq!(fenix_airac_cycle("2608").unwrap(), "2608");
+        assert_eq!(fenix_airac_cycle("2608n1").unwrap(), "2608");
+        assert!(fenix_airac_cycle("2608-1").is_err());
+        assert!(fenix_airac_cycle("26n8").is_err());
     }
 }

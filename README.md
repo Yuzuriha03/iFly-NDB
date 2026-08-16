@@ -40,9 +40,11 @@ Validation checks:
 - matching iFly `cycle.json` and `FMC_Ident.txt` metadata;
 - required Permanent files and procedure directories;
 - CRLF/fixed-width airport, runway, navaid, and fix records;
-- airport, runway, navaid/ILS, route, and procedure record counts.
+- nonempty fix/route data and the required permanent procedure files.
 
 The command fails rather than combining different AIRAC cycles.
+Fenix `CycleName` values with a revision suffix, such as `2608n1`, are
+validated against the four-digit AIRAC cycle (`2608`) required by iFly.
 
 ## Convert
 
